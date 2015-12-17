@@ -65,9 +65,9 @@ attach	pwmpxa at pxaip
 file	arch/arm/xscale/pxa2x0_pwm.c		pwmpxa
 
 # USB Device Controller
-device	pxaudc
+device	pxaudc: usbdev
 attach	pxaudc at pxaip
-file	arch/arm/xscale/pxa2x0_udc.c		pxaudc
+file	arch/arm/xscale/pxa25x_udc.c		pxaudc
 
 # OHCI USB controller
 attach	ohci at pxaip with pxaohci

@@ -53,11 +53,11 @@
 #include <sys/param.h>
 #include <sys/device.h>
 #include <sys/kthread.h>
-#include <sys/timeout.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
+#include <sys/callout.h>
 
-#include <machine/bus.h>
+#include <sys/bus.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -68,25 +68,25 @@
 #ifndef USBF_DEBUG
 #define DPRINTF(l, x)	do {} while (0)
 #else
-int usbfdebug = 0;
+int usbfdebug = 10;
 #define DPRINTF(l, x)	if ((l) <= usbfdebug) printf x; else {}
 #endif
 
 struct usbf_softc {
-	struct device	 	 sc_dev;	/* base device */
+	device_t	 	 sc_dev;	/* base device */
 	struct usbf_bus	 	*sc_bus;	/* USB device controller */
 	struct usbf_port 	 sc_port;	/* dummy port for function */
-	struct proc		*sc_proc;	/* task thread */
+	lwp_t			*sc_proc;	/* task thread */
 	TAILQ_HEAD(,usbf_task)	 sc_tskq;	/* task queue head */
 	int			 sc_dying;
 
 	u_int8_t		*sc_hs_config;
 };
 
-#define DEVNAME(sc)	((sc)->sc_dev.dv_xname)
+#define DEVNAME(sc)	device_xname((sc)->sc_dev)
 
-int	    	usbf_match(struct device *, void *, void *);
-void	    	usbf_attach(struct device *, struct device *, void *);
+int	    	usbf_match(device_t, cfdata_t, void *);
+void	    	usbf_attach(device_t, device_t, void *);
 void	    	usbf_create_thread(void *);
 void	    	usbf_task_thread(void *);
 
@@ -99,36 +99,52 @@ usbf_status	usbf_set_config(struct usbf_device *, u_int8_t);
 void		usbf_dump_request(struct usbf_device *, usb_device_request_t *);
 #endif
 
-struct cfattach usbf_ca = {
-	sizeof(struct usbf_softc), usbf_match, usbf_attach
-};
+extern struct cfdriver usbf_cd;
 
-struct cfdriver usbf_cd = {
-	NULL, "usbf", DV_DULL
-};
+CFATTACH_DECL3_NEW(usbf, sizeof(struct usbf_softc),
+		   usbf_match, usbf_attach, NULL, NULL, NULL, NULL, 0);
+/* TODO: add detach, activate, child detach and rescan */
+
 
 static const char * const usbrev_str[] = USBREV_STR;
 
 int
-usbf_match(struct device *parent, void *match, void *aux)
+usbf_match(device_t parent, cfdata_t match, void *aux)
 {
-	return UMATCH_GENERIC;
+	struct usbdev_attach_args *uaa = aux;
+
+#if 0
+	DPRINTF(0, ("%s: parent=%s uaa=%p: %s\n",
+	       __func__,
+	       device_xname(parent),
+	       uaa,
+		    uaa == NULL ? "" : uaa->uaa_busname));
+#endif
+	
+	if (strcmp(uaa->uaa_busname, "usbdev") == 0)
+		return 1;
+	return 0;
 }
 
 void
-usbf_attach(struct device *parent, struct device *self, void *aux)
+usbf_attach(device_t parent, device_t self, void *aux)
 {
-	struct usbf_softc *sc = (struct usbf_softc *)self;
+	struct usbf_softc *sc = device_private(self);
+	struct usbdev_attach_args *uaa = aux;
 	int usbrev;
 	int speed;
 	usbf_status err;
 
+	sc->sc_dev = self;
+
 	/* Continue to set up the bus struct. */
-	sc->sc_bus = aux;
+	sc->sc_bus = uaa->uaa_bus;
 	sc->sc_bus->usbfctl = sc;
 
 	usbrev = sc->sc_bus->usbrev;
-	printf(": USB revision %s", usbrev_str[usbrev]);
+	aprint_normal(": USB revision %s", usbrev_str[usbrev]);
+	aprint_naive("\n");
+
 	switch (usbrev) {
 	case USBREV_2_0:
 		speed = USB_SPEED_HIGH;
@@ -138,11 +154,11 @@ usbf_attach(struct device *parent, struct device *self, void *aux)
 		speed = USB_SPEED_FULL;
 		break;
 	default:
-		printf(", not supported\n");
+		aprint_error(", not supported\n");
 		sc->sc_dying = 1;
 		return;
 	}
-	printf("\n");
+	aprint_normal("\n");
 
 	/* Initialize the usbf struct. */
 	TAILQ_INIT(&sc->sc_tskq);
@@ -164,8 +180,11 @@ usbf_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	/* Create a process context for asynchronous tasks. */
-	config_pending_incr();
-	kthread_create_deferred(usbf_create_thread, sc);
+	if (kthread_create(PRI_NONE, 0, NULL, usbf_task_thread, sc,
+			   &sc->sc_proc, "%s", device_xname(self)) ) {
+		aprint_normal_dev(self, "unable to create event thread for USB client\n");
+	}
+	
 }
 
 /*
@@ -217,6 +236,7 @@ usbf_rem_task(struct usbf_device *dev, struct usbf_task *task)
 	splx(s);
 }
 
+#if 0
 /*
  * Called from the kernel proper when it can create threads.
  */
@@ -232,6 +252,7 @@ usbf_create_thread(void *arg)
 	}
 	config_pending_decr();
 }
+#endif
 
 /*
  * Process context for USB function tasks.
@@ -282,6 +303,20 @@ usbf_host_reset(struct usbf_bus *bus)
 	/* Change device state from any state backe to Default. */
 	(void)usbf_set_config(dev, USB_UNCONFIG_NO);
 	dev->address = 0;
+
+	bus->ep0state = EP0_IDLE;
+
+#if 0
+	SIMPLEQ_INIT(&dev->default_pipe);
+#else
+	while (!SIMPLEQ_EMPTY(&dev->default_pipe->queue)) {
+		DPRINTF(0, ("%s: dequeue xfer %p", __func__, SIMPLEQ_FIRST(&dev->default_pipe->queue)));
+		SIMPLEQ_REMOVE_HEAD(&dev->default_pipe->queue, next);
+	}
+#endif		
+	usbf_setup_default_xfer(dev->default_xfer, dev->default_pipe,
+	    NULL, &dev->def_req, 0, 0, usbf_do_request);
+	usbf_transfer(dev->default_xfer);
 }
 
 /*
@@ -299,6 +334,7 @@ usbf_get_descriptor(struct usbf_device *dev, usb_device_request_t *req,
 	usb_string_descriptor_t *sd;
 	struct usbf_softc *sc;
 
+	printf("%s: type=%d index=%d\n", __func__, type, index);
 	switch (type) {
 	case UDESC_DEVICE:
 		dd = usbf_device_descriptor(dev);
@@ -443,6 +479,14 @@ usbf_do_request(struct usbf_xfer *xfer, void *priv,
 	u_int16_t value;
 	u_int16_t index;
 
+	/* XXX */
+	if (dev->bus->ep0state == EP0_END_XFER &&
+	    err == USBF_SHORT_XFER) {
+
+		dev->bus->ep0state = EP0_IDLE;
+		goto next;
+	}
+
 	if (err) {
 		DPRINTF(0,("usbf_do_request: receive failed, %s\n",
 		    usbf_errstr(err)));
@@ -553,6 +597,7 @@ usbf_do_request(struct usbf_xfer *xfer, void *priv,
 			    "sending ZLP\n"));
 			USETW(req->wLength, 0);
 		}
+		printf("%s: reply IN data length=%d\n", __func__, UGETW(req->wLength));
 		/* Transfer IN data in response to the request. */
 		usbf_setup_xfer(dev->data_xfer, dev->default_pipe,
 		    NULL, data, UGETW(req->wLength), 0, 0, NULL);
@@ -563,6 +608,7 @@ usbf_do_request(struct usbf_xfer *xfer, void *priv,
 		}
 	}
 
+next:
 	/* Schedule another request transfer. */
 	usbf_setup_default_xfer(dev->default_xfer, dev->default_pipe,
 	    NULL, &dev->def_req, 0, 0, usbf_do_request);
@@ -572,6 +618,13 @@ usbf_do_request(struct usbf_xfer *xfer, void *priv,
 		    usbf_errstr(err)));
 	}
 }
+
+device_t
+usbf_device(struct usbf_softc *sc)
+{
+	return sc->sc_dev;
+}
+
 
 #ifdef USBF_DEBUG
 struct usb_enum_str {

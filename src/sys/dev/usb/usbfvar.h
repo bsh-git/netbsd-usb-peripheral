@@ -51,7 +51,7 @@ struct usbf_config {
 };
 
 struct usbf_device {
-	struct device		 bdev;		/* base device */
+	device_t		 xxbdev;		/* base device */
 	struct usbf_bus		*bus;		/* device controller */
 	struct usbf_function	*function;	/* function driver */
 	struct usbf_pipe	*default_pipe;	/* pipe 0 (device control) */
@@ -83,9 +83,9 @@ struct usbf_pipe_methods {
 struct usbf_bus_methods {
 	usbf_status	  (*open_pipe)(struct usbf_pipe *);
 	void		  (*soft_intr)(void *);
-	usbf_status	  (*allocm)(struct usbf_bus *, struct usb_dma *,
+	usbf_status	  (*allocm)(struct usbf_bus *, usb_dma_t *,
 			      u_int32_t);
-	void		  (*freem)(struct usbf_bus *, struct usb_dma *);
+	void		  (*freem)(struct usbf_bus *, usb_dma_t *);
 	struct usbf_xfer *(*allocx)(struct usbf_bus *);
 	void		  (*freex)(struct usbf_bus *, struct usbf_xfer *);
 };
@@ -94,10 +94,15 @@ struct usbf_softc;
 
 struct usbf_bus {
 	/* Filled by DC driver */
-	struct device		 bdev;		/* base device */
+	device_t		 bdev;		/* base device */
 	struct usbf_bus_methods	*methods;
 	size_t			 pipe_size;	/* size of pipe struct */
 	u_int8_t		 ep0_maxp;	/* packet size for EP0 */
+	enum {
+		EP0_IDLE,	/* waiting for SETUP */
+		EP0_IN_DATA_PHASE,	/* sending IN packets to the host */
+		EP0_END_XFER		/* all data is sent. */
+	}			 ep0state;
 	int			 usbrev;	/* as in struct usbd_bus */
 	/* Filled by usbf driver */
 	struct usbf_softc	*usbfctl;
@@ -144,18 +149,19 @@ struct usbf_xfer {
 	/* for memory management */
 	struct usbf_device	*device;
 	int			 rqflags;
-	struct usb_dma		 dmabuf;
+	usb_dma_t		 dmabuf;
 
-	struct timeout		 timeout_handle;
+	struct callout		 timeout_handle;
 };
 
 
 /* usbf.c */
 void	    usbf_host_reset(struct usbf_bus *);
 void	    usbf_do_request(struct usbf_xfer *, void *, usbf_status);
+device_t    usbf_device(struct usbf_softc *);
 
 /* usbf_subr.c */
-usbf_status usbf_new_device(struct device *, struct usbf_bus *, int, int, int,
+usbf_status usbf_new_device(device_t, struct usbf_bus *, int, int, int,
 				     struct usbf_port *);
 usbf_status usbf_set_endpoint_feature(struct usbf_config *, u_int8_t,
 				      u_int16_t);
@@ -163,7 +169,8 @@ usbf_status usbf_clear_endpoint_feature(struct usbf_config *, u_int8_t,
 					u_int16_t);
 usbf_status usbf_insert_transfer(struct usbf_xfer *xfer);
 void	    usbf_transfer_complete(struct usbf_xfer *xfer);
-usbf_status usbf_allocmem(struct usbf_bus *, size_t, size_t, struct usb_dma *);
-void	    usbf_freemem(struct usbf_bus *, struct usb_dma *);
+usbf_status usbf_allocmem(struct usbf_bus *, size_t, size_t, usb_dma_t *);
+void	    usbf_freemem(struct usbf_bus *, usb_dma_t *);
 usbf_status usbf_softintr_establish(struct usbf_bus *);
 void	    usbf_schedsoftintr(struct usbf_bus *);
+char *usbf_describe_xfer(struct usbf_xfer *);

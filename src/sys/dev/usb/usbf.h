@@ -66,6 +66,12 @@ typedef enum { /* keep in sync with USBF_ERROR_STRS */
 
 typedef void (*usbf_callback)(struct usbf_xfer *, void *, usbf_status);
 
+struct usbdev_attach_args {
+	const char *uaa_busname;
+	struct usbf_bus *uaa_bus;
+};
+
+
 /*
  * Attach USB function at the logical device.
  */
@@ -80,7 +86,8 @@ struct usbf_function_methods {
 };
 
 struct usbf_function {
-	struct device bdev;		/* base device */
+	device_t      dev; 		/* base device */
+	//struct device bdev;
 	/* filled in by function driver */
 	struct usbf_function_methods *methods;
 };

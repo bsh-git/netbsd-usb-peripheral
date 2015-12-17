@@ -25,7 +25,7 @@ attach	usb at usbus
 file	dev/usb/usb.c			usb			needs-flag
 file	dev/usb/usbdi.c			usb
 file	dev/usb/usbdi_util.c		usb
-file	dev/usb/usb_mem.c		usb & usb_dma
+file	dev/usb/usb_mem.c		(usb & usb_dma) | usbf
 file	dev/usb/usb_subr.c		usb
 file	dev/usb/usb_quirks.c		usb
 file	dev/usb/usb_verbose.c		usb & usbverbose

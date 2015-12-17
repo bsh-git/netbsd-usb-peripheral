@@ -1,3 +1,4 @@
+/*	$NetBSD$ */
 /*	$OpenBSD: pxa27x_udc.h,v 1.4 2013/10/24 22:40:10 aalm Exp $	*/
 /*
  * Copyright (c) 2009 Marek Vasut <marex@openbsd.org>
@@ -21,13 +22,26 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <arm/xscale/pxa27x_udcreg.h>
+//#include <arm/xscale/pxa2x0reg.h>
+
+/*
+ * following files should be included before this file.
+ * <dev/usb/usb.h>
+ * <dev/usb/usbdi.h>
+ * <dev/usb/usbdivar.h>
+ * <dev/usb/usbf.h>
+ * <dev/usb/usbfvar.h>
+ */
 
 #define PXAUDC_EP0MAXP	16	/* XXX */
+#ifdef	CPU_XSCALE_PXA270
 #define PXAUDC_NEP	24	/* total number of endpoints */
+#else
+#define PXAUDC_NEP	16	/* total number of endpoints */
+#endif
 
 struct pxaudc_softc {
-	struct usbf_bus		 sc_bus;
+	struct usbf_bus		 sc_bus;	/* must be the first member */
 	bus_space_tag_t		 sc_iot;
 	bus_space_handle_t	 sc_ioh;
 	bus_size_t		 sc_size;
@@ -36,29 +50,57 @@ struct pxaudc_softc {
 	SIMPLEQ_HEAD(,usbf_xfer) sc_free_xfers;	/* recycled xfers */
 	u_int32_t		 sc_icr0;	/* enabled EP interrupts */
 	u_int32_t		 sc_icr1;	/* enabled EP interrupts */
+#if 0
+	enum {
+		EP0_SETUP,
+		EP0_IN
+	}			 sc_ep0state;
+#endif
+	struct pxaudc_pipe	*sc_pipe[PXAUDC_NEP];
+	int			 sc_npipe;
+
+#ifdef	CPU_XSCALE_PXA250
+	unsigned int	sc_isr;		/* 0..15: endpoint interrupts */
+
+#define		INTR_RESUME	(1<<25)
+#define	  	INTR_SUSPEND	(1<<26)
+#define  	INTR_RESET	(1<<27)
+#endif
+#ifdef	CPU_XSCALE_PXA270
 	u_int32_t		 sc_isr0;	/* XXX deferred interrupts */
 	u_int32_t		 sc_isr1;	/* XXX deferred interrupts */
 	u_int32_t		 sc_otgisr;	/* XXX deferred interrupts */
-	struct pxaudc_pipe	*sc_pipe[PXAUDC_NEP];
-	int			 sc_npipe;
 
 	int			 sc_cn;
 	int			 sc_in;
 	int			 sc_isn;
 	int8_t			 sc_ep_map[16];
+#endif
 
-	struct device		*sc_dev;
-
+#if 0
 	int			sc_gpio_detect;
 	int			sc_gpio_detect_inv;
 
 	int			sc_gpio_pullup;
 	int			sc_gpio_pullup_inv;
+#endif
 
+#if defined(CPU_XSCALE_PXA270)
 	int			(*sc_is_host)(void);
+#define	pxaudc_is_host(sc)	(sc->sc_is_host())	
+#else
+#define	pxaudc_is_host(sc)	0
+#endif
+
+	callout_t callout;
 };
 
+#if 0
 int		 pxaudc_match(void);
 void		 pxaudc_attach(struct pxaudc_softc *, void *);
 int		 pxaudc_detach(struct pxaudc_softc *, int);
 int		 pxaudc_activate(struct pxaudc_softc *, int);
+#endif
+
+/* for other attachment than to pxaip */
+int pxaudc_attach_sub(device_t, struct pxaip_attach_args *);

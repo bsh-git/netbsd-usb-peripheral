@@ -23,9 +23,11 @@
 #include <sys/param.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
-#include <sys/timeout.h>
+#include <sys/callout.h>
+#include <sys/intr.h>
+#include <sys/proc.h>
 
-#include <machine/bus.h>
+#include <sys/bus.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -39,6 +41,10 @@
 #else
 extern int usbfdebug;
 #define DPRINTF(l, x)	if ((l) <= usbfdebug) printf x; else {}
+#endif
+
+#ifndef	UC_BUS_POWERED
+#define	UC_BUS_POWERED	UC_ATTR_MBO
 #endif
 
 void	    *usbf_realloc(void **, size_t *, size_t);
@@ -74,13 +80,13 @@ usbf_realloc(void **pp, size_t *sizep, size_t newsize)
 
 	if (newsize == 0) {
 		if (*sizep > 0)
-			free(*pp, M_USB, 0);
+			free(*pp, M_USB);
 		*pp = NULL;
 		*sizep = 0;
 		return NULL;
 	}
 
-	p = malloc(newsize, M_USB, M_NOWAIT);
+	p = malloc(newsize, M_USBDEv, M_NOWAIT);
 	if (p == NULL)
 		return NULL;
 
@@ -90,7 +96,7 @@ usbf_realloc(void **pp, size_t *sizep, size_t newsize)
 #if 0
 	/* XXX must leak for now; something unknown has a pointer */
 	if (*pp != NULL)
-		free(*pp, M_USB, 0);
+		free(*pp, M_USB);
 #endif
 	*pp = p;
 	*sizep = newsize;
@@ -117,7 +123,7 @@ usbf_probe_and_attach(struct device *parent, struct usbf_device *dev, int port)
 	 * be initialized in the function driver's attach routine.  Also, it
 	 * should use usbf_devinfo_setup() to set the device identification.
 	 */
-	dv = config_found_sm(parent, &uaa, NULL, NULL);
+	dv = config_found(parent, &uaa, NULL);
 	if (dv != NULL) {
 		dev->function = (struct usbf_function *)dv;
 		return USBF_NORMAL_COMPLETION;
@@ -141,11 +147,11 @@ usbf_remove_device(struct usbf_device *dev, struct usbf_port *up)
 	if (dev->default_pipe != NULL)
 		usbf_close_pipe(dev->default_pipe);
 	up->device = NULL;
-	free(dev, M_USB, 0);
+	free(dev, M_USB);
 }
 
 usbf_status
-usbf_new_device(struct device *parent, struct usbf_bus *bus, int depth,
+usbf_new_device(device_t parent, struct usbf_bus *bus, int depth,
     int speed, int port, struct usbf_port *up)
 {
 	struct usbf_device *dev;
@@ -155,6 +161,8 @@ usbf_new_device(struct device *parent, struct usbf_bus *bus, int depth,
 #ifdef DIAGNOSTIC
 	KASSERT(up->device == NULL);
 #endif
+
+	DPRINTF(0,("%s: %s: rev=%x\n", __func__, device_xname(parent), bus->usbrev));
 
 	dev = malloc(sizeof(*dev), M_USB, M_NOWAIT | M_ZERO);
 	if (dev == NULL)
@@ -193,7 +201,7 @@ usbf_new_device(struct device *parent, struct usbf_bus *bus, int depth,
 	err = usbf_setup_pipe(dev, NULL, &dev->def_ep, 0,
 	    &dev->default_pipe);
 	if (err) {
-		free(dev, M_USB, 0);
+		free(dev, M_USB);
 		return err;
 	}
 
@@ -204,7 +212,7 @@ usbf_new_device(struct device *parent, struct usbf_bus *bus, int depth,
 		if (dev->default_xfer != NULL)
 			usbf_free_xfer(dev->default_xfer);
 		usbf_close_pipe(dev->default_pipe);
-		free(dev, M_USB, 0);
+		free(dev, M_USB);
 		return USBF_NOMEM;
 	}
 
@@ -216,7 +224,7 @@ usbf_new_device(struct device *parent, struct usbf_bus *bus, int depth,
 		usbf_free_xfer(dev->default_xfer);
 		usbf_free_xfer(dev->data_xfer);
 		usbf_close_pipe(dev->default_pipe);
-		free(dev, M_USB, 0);
+		free(dev, M_USB);
 		return err;
 	}
 
@@ -227,8 +235,13 @@ usbf_new_device(struct device *parent, struct usbf_bus *bus, int depth,
 
 	/* Attach function driver. */
 	err = usbf_probe_and_attach(parent, dev, port);
-	if (err)
+	if (err) {
+		DPRINTF(0, ("%s: %s: usbf_probe_and_attach failed. err=%d\n",
+			     device_xname(parent),
+			     __func__, err));
 		usbf_remove_device(dev, up);
+
+	}
 	return err;
 }
 
@@ -289,7 +302,7 @@ void
 usbf_devinfo_free(char *devinfo)
 {
 	if (devinfo != NULL)
-		free(devinfo, M_USB, 0);
+		free(devinfo, M_USB);
 }
 
 /*
@@ -351,7 +364,7 @@ usbf_string_descriptor(struct usbf_device *dev, u_int8_t id)
 	case USBF_EMPTY_STRING_ID:
 		sd1.bLength = 2;
 		sd1.bDescriptorType = UDESC_STRING;
-		return &sd0;
+		return &sd1;
 	}
 
 	/* check if the string id is valid */
@@ -407,7 +420,7 @@ usbf_add_config(struct usbf_device *dev, struct usbf_config **ucp)
 
 	cd = malloc(sizeof *cd, M_USB, M_NOWAIT | M_ZERO);
 	if (cd == NULL) {
-		free(uc, M_USB, 0);
+		free(uc, M_USB);
 		return USBF_NOMEM;
 	}
 
@@ -483,7 +496,7 @@ usbf_add_interface(struct usbf_config *uc, u_int8_t bInterfaceClass,
 
 	id = malloc(sizeof *id, M_USB, M_NOWAIT | M_ZERO);
 	if (id == NULL) {
-		free(ui, M_USB, 0);
+		free(ui, M_USB);
 		return USBF_NOMEM;
 	}
 
@@ -524,7 +537,7 @@ usbf_add_endpoint(struct usbf_interface *ui, u_int8_t bEndpointAddress,
 
 	ed = malloc(sizeof *ed, M_USB, M_NOWAIT | M_ZERO);
 	if (ed == NULL) {
-		free(ue, M_USB, 0);
+		free(ue, M_USB);
 		return USBF_NOMEM;
 	}
 
@@ -566,7 +579,7 @@ usbf_end_config(struct usbf_config *uc)
 		if (err)
 			break;
 
-		free(ui->idesc, M_USB, 0);
+		free(ui->idesc, M_USB);
 		ui->idesc = (usb_interface_descriptor_t *)d;
 
 		SIMPLEQ_FOREACH(ue, &ui->endpoint_head, next) {
@@ -575,7 +588,7 @@ usbf_end_config(struct usbf_config *uc)
 			if (err)
 				break;
 
-			free(ue->edesc, M_USB, 0);
+			free(ue->edesc, M_USB);
 			ue->edesc = (usb_endpoint_descriptor_t *)d;
 		}
 	}
@@ -671,7 +684,7 @@ usbf_setup_pipe(struct usbf_device *dev, struct usbf_interface *iface,
 	SIMPLEQ_INIT(&p->queue);
 	err = dev->bus->methods->open_pipe(p);
 	if (err) {
-		free(p, M_USB, 0);
+		free(p, M_USB);
 		return err;
 	}
 	*pipe = p;
@@ -707,7 +720,7 @@ usbf_close_pipe(struct usbf_pipe *pipe)
 	usbf_abort_pipe(pipe);
 	pipe->methods->close(pipe);
 	pipe->endpoint->refcnt--;
-	free(pipe, M_USB, 0);
+	free(pipe, M_USB);
 }
 
 void
@@ -809,22 +822,22 @@ usbf_alloc_xfer(struct usbf_device *dev)
 	if (xfer == NULL)
 		return NULL;
 	xfer->device = dev;
-	timeout_set(&xfer->timeout_handle, NULL, NULL);
-	DPRINTF(1,("usbf_alloc_xfer() = %p\n", xfer));
+	callout_init(&xfer->timeout_handle, 0);
+	DPRINTF(999,("usbf_alloc_xfer() = %p\n", xfer));
 	return xfer;
 }
 
 void
 usbf_free_xfer(struct usbf_xfer *xfer)
 {
-	DPRINTF(1,("usbf_free_xfer: %p\n", xfer));
+	DPRINTF(999,("usbf_free_xfer: %p\n", xfer));
 	if (xfer->rqflags & (URQ_DEV_DMABUF | URQ_AUTO_DMABUF))
 		usbf_free_buffer(xfer);
 	xfer->device->bus->methods->freex(xfer->device->bus, xfer);
 }
 
 usbf_status
-usbf_allocmem(struct usbf_bus *bus, size_t size, size_t align, struct usb_dma *p)
+usbf_allocmem(struct usbf_bus *bus, size_t size, size_t align, usb_dma_t *p)
 {
 	struct usbd_bus dbus;
 	usbd_status err;
@@ -836,7 +849,7 @@ usbf_allocmem(struct usbf_bus *bus, size_t size, size_t align, struct usb_dma *p
 }
 
 void
-usbf_freemem(struct usbf_bus *bus, struct usb_dma *p)
+usbf_freemem(struct usbf_bus *bus, usb_dma_t *p)
 {
 	usb_freemem((struct usbd_bus *)NULL, p);
 }
@@ -847,10 +860,14 @@ usbf_alloc_buffer(struct usbf_xfer *xfer, u_int32_t size)
 	struct usbf_bus *bus = xfer->device->bus;
 	usbf_status err;
 
+	DPRINTF(999,("%s: xfer=%p\n", __func__, xfer));
+
 #ifdef DIAGNOSTIC
 	if (xfer->rqflags & (URQ_DEV_DMABUF | URQ_AUTO_DMABUF))
 		printf("xfer %p already has a buffer\n", xfer);
 #endif
+
+	DPRINTF(999,("%s: allocm=%p\n", __func__, bus->methods->allocm));
 
 	err = bus->methods->allocm(bus, &xfer->dmabuf, size);
 	if (err)
@@ -881,17 +898,17 @@ usbf_free_buffer(struct usbf_xfer *xfer)
 static void
 usbf_dump_buffer(struct usbf_xfer *xfer)
 {
-	struct device *dev = (struct device *)xfer->pipe->device->bus->usbfctl;
+	device_t dev = usbf_device(xfer->pipe->device->bus->usbfctl);
 	struct usbf_endpoint *ep = xfer->pipe->endpoint;
 	int index = usbf_endpoint_index(ep);
 	int dir = usbf_endpoint_dir(ep);
 	u_char *p = xfer->buffer;
 	u_int i;
 
-	printf("%s: ep%d-%s, length=%u, %s", dev->dv_xname, index,
+	printf("%s: ep%d-%s, actlen=%u length=%u, %s", device_xname(dev), index,
 	    (xfer->rqflags & URQ_REQUEST) ? "setup" :
 	    (index == 0 ? "in" : (dir == UE_DIR_IN ? "in" : "out")),
-	    xfer->length, usbf_errstr(xfer->status));
+	       xfer->actlen, xfer->length, usbf_errstr(xfer->status));
 
 	for (i = 0; i < xfer->length; i++) {
 		if ((i % 16) == 0)
@@ -968,6 +985,24 @@ usbf_transfer(struct usbf_xfer *xfer)
 	return err;
 }
 
+char *
+usbf_describe_xfer(struct usbf_xfer *xfer)
+{
+	static char buf[100];
+	struct usbf_endpoint *ep = xfer->pipe->endpoint;
+	int index = usbf_endpoint_index(ep);
+	int dir = usbf_endpoint_dir(ep);
+
+	snprintf(buf, sizeof buf, "%p:ep%d-%s len=%d,actlen=%d",
+		 xfer,
+		 index,
+		 (xfer->rqflags & URQ_REQUEST) ? "setup" :
+		 (index == 0 ? "in" : (dir == UE_DIR_IN ? "in" : "out")),
+		 xfer->length, xfer->actlen);
+		 
+	return buf;
+}
+
 usbf_status
 usbf_insert_transfer(struct usbf_xfer *xfer)
 {
@@ -975,8 +1010,10 @@ usbf_insert_transfer(struct usbf_xfer *xfer)
 	usbf_status err;
 	int s;
 
-	DPRINTF(1,("usbf_insert_transfer: xfer=%p pipe=%p running=%d\n",
-	    xfer, pipe, pipe->running));
+
+	DPRINTF(1,("usbf_insert_transfer: xfer=%s pipe=%p running=%d callback=%p\n",
+		   usbf_describe_xfer(xfer),
+		   pipe, pipe->running, xfer->callback));
 
 	s = splusb();
 	SIMPLEQ_INSERT_TAIL(&pipe->queue, xfer, next);
@@ -996,7 +1033,7 @@ usbf_start_next(struct usbf_pipe *pipe)
 	struct usbf_xfer *xfer;
 	usbf_status err;
 
-	SPLUSBCHECK;
+	//SPLUSBCHECK;
 
 	/* Get next request in queue. */
 	xfer = SIMPLEQ_FIRST(&pipe->queue);
@@ -1019,9 +1056,9 @@ usbf_transfer_complete(struct usbf_xfer *xfer)
 	struct usbf_pipe *pipe = xfer->pipe;
 	int repeat = pipe->repeat;
 
-	SPLUSBCHECK;
-	DPRINTF(1,("usbf_transfer_complete: xfer=%p pipe=%p running=%d\n",
-	    xfer, pipe, pipe->running));
+	//SPLUSBCHECK;
+	DPRINTF(1,("usbf_transfer_complete: xfer=%s pipe=%p running=%d callback=%p\n",
+		   usbf_describe_xfer(xfer), pipe, pipe->running, xfer->callback));
 #ifdef USBF_DEBUG
 	if (usbfdebug > 0)
 		usbf_dump_buffer(xfer);
@@ -1067,7 +1104,7 @@ usbf_softintr_establish(struct usbf_bus *bus)
 {
 	KASSERT(bus->soft == NULL);
 
-	bus->soft = softintr_establish(IPL_SOFTUSB,
+	bus->soft = softint_establish(IPL_SOFTUSB,
 	    bus->methods->soft_intr, bus);
 	if (bus->soft == NULL)
 		return USBF_INVAL;
@@ -1078,5 +1115,5 @@ usbf_softintr_establish(struct usbf_bus *bus)
 void
 usbf_schedsoftintr(struct usbf_bus *bus)
 {
-	softintr_schedule(bus->soft);
+	softint_schedule(bus->soft);
 }

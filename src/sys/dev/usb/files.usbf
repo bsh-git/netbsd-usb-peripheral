@@ -1,0 +1,15 @@
+#	$NetBSD$
+#
+# Config file and device description for machine-independent device-side
+# USB support.
+#
+
+# USB logical device
+device	usbf {}
+attach	usbf at usbdev
+file	dev/usb/usbf.c		usbf	needs-flag
+file	dev/usb/usbf_subr.c	usbf
+
+device	cdcef {}
+attach	cdcef at usbf
+file	dev/usb/if_cdcef.c	cdcef
