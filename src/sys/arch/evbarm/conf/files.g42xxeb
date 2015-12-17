@@ -42,3 +42,6 @@ file	arch/evbarm/g42xxeb/gb225_slhci.c	slhci_opio
 
 attach pxamci at obio with pxamci_obio
 file   arch/evbarm/g42xxeb/g42xxeb_mci.c	pxamci_obio
+
+attach pxaudc at obio with pxaudc_obio
+file   arch/evbarm/g42xxeb/g42xxeb_udc.c	pxaudc_obio

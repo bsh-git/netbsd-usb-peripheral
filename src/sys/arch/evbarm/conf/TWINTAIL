@@ -370,6 +370,17 @@ sdmmc* at pxamci?
 
 ld* at sdmmc?				# MMC/SD card
 
+# UDC test
+#  (attached on obio for USB host detection)
+pxaudc0 at obio?
+
+# USB function support
+usbf*		at pxaudc?		# USB logical device
+cdcef*		at usbf?		# CDC ethernet function
+#options  	USBF_DEBUG
+#options	CDCEF_DEBUG
+
+
 # Pseudo-Devices
 
 # disk/mass storage pseudo-devices
