@@ -110,7 +110,11 @@ static usbf_status
 usbf_probe_and_attach(struct device *parent, struct usbf_device *dev, int port)
 {
 	struct usbf_attach_arg uaa;
+#ifdef	__NetBSD__
+	device_t dv;
+#else
 	struct device *dv;
+#endif
 
 	KASSERT(dev->function == NULL);
 
@@ -125,7 +129,11 @@ usbf_probe_and_attach(struct device *parent, struct usbf_device *dev, int port)
 	 */
 	dv = config_found(parent, &uaa, NULL);
 	if (dv != NULL) {
+#ifdef	__NetBSD__
+		dev->function = (struct usbf_function *)device_private(dv);
+#else
 		dev->function = (struct usbf_function *)dv;
+#endif		
 		return USBF_NORMAL_COMPLETION;
 	}
 
