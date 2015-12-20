@@ -13,3 +13,8 @@ file	dev/usb/usbf_subr.c	usbf
 device	cdcef {}
 attach	cdcef at usbf
 file	dev/usb/if_cdcef.c	cdcef
+
+# emulate FTDI serial driver
+device	upftdi: ucombus
+attach	upftdi at usbf
+file	dev/usb/upftdi.c	upftdi
