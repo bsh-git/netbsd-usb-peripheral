@@ -76,8 +76,10 @@ struct usbf_softc {
 	device_t	 	 sc_dev;	/* base device */
 	struct usbf_bus	 	*sc_bus;	/* USB device controller */
 	struct usbf_port 	 sc_port;	/* dummy port for function */
+#if 0
 	lwp_t			*sc_proc;	/* task thread */
 	TAILQ_HEAD(,usbf_task)	 sc_tskq;	/* task queue head */
+#endif
 	int			 sc_dying;
 
 	u_int8_t		*sc_hs_config;
@@ -160,8 +162,10 @@ usbf_attach(device_t parent, device_t self, void *aux)
 	}
 	aprint_normal("\n");
 
+#if 0
 	/* Initialize the usbf struct. */
 	TAILQ_INIT(&sc->sc_tskq);
+#endif
 
 	/* Establish the software interrupt. */
 	if (usbf_softintr_establish(sc->sc_bus)) {
@@ -179,18 +183,20 @@ usbf_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 
+#if 0
 	/* Create a process context for asynchronous tasks. */
 	if (kthread_create(PRI_NONE, 0, NULL, usbf_task_thread, sc,
 			   &sc->sc_proc, "%s", device_xname(self)) ) {
 		aprint_normal_dev(self, "unable to create event thread for USB client\n");
 	}
-	
+#endif	
 }
 
 /*
  * USB device tasks
  */
 
+#if 0
 /*
  * Add a task to be performed by the task thread.  This function can be
  * called from any context and the task function will be executed in a
@@ -235,6 +241,7 @@ usbf_rem_task(struct usbf_device *dev, struct usbf_task *task)
 	}
 	splx(s);
 }
+#endif
 
 #if 0
 /*
@@ -252,7 +259,6 @@ usbf_create_thread(void *arg)
 	}
 	config_pending_decr();
 }
-#endif
 
 /*
  * Process context for USB function tasks.
@@ -288,6 +294,7 @@ usbf_task_thread(void *arg)
 	DPRINTF(0,("usbf_task_thread: exit\n"));
 	kthread_exit(0);
 }
+#endif
 
 /*
  * Bus event handling
@@ -577,14 +584,26 @@ usbf_do_request(struct usbf_xfer *xfer, void *priv,
 	default: {
 		struct usbf_function *fun = dev->function;
 		
+		DPRINTF(5,("usbf_do_request: xfer=%p dev=%p, fun=%p methods=%p %p %p\n",
+			   xfer,
+			   dev,
+			   fun, fun->methods,
+			   fun->methods ? fun->methods->set_config : NULL,
+			   fun->methods ? fun->methods->do_request : NULL));
+
 		if (fun == NULL)
 			err = USBF_STALLED;
-		else
+		else {
 			/* XXX change prototype for this method to remove
 			 * XXX the data argument. */
+			DPRINTF(0, ("calling do_request %p\n", fun->methods->do_request));
 			err = fun->methods->do_request(fun, req, &data);
+			DPRINTF(0, ("return from do_request err=%d\n", err));
+		}
 	}
 	}
+
+	DPRINTF(5,("usbf_do_request: %d err=%d\n", __LINE__, err));
 
 	if (err) {
 		DPRINTF(0,("usbf_do_request: request=%#x, type=%#x "
@@ -617,6 +636,8 @@ next:
 		DPRINTF(0,("usbf_do_request: ctrl xfer=%p, %s\n", xfer,
 		    usbf_errstr(err)));
 	}
+
+	DPRINTF(5,("usbf_do_request: done\n"));
 }
 
 device_t
