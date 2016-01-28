@@ -29,8 +29,7 @@
  * <dev/usb/usb.h>
  * <dev/usb/usbdi.h>
  * <dev/usb/usbdivar.h>
- * <dev/usb/usbf.h>
- * <dev/usb/usbfvar.h>
+ * <dev/usb/usbp.h>
  */
 
 #define PXAUDC_EP0MAXP	16	/* XXX */
@@ -41,13 +40,14 @@
 #endif
 
 struct pxaudc_softc {
-	struct usbf_bus		 sc_bus;	/* must be the first member */
+	struct usbp_bus		 sc_bus;
+	device_t    		 sc_dev;
 	bus_space_tag_t		 sc_iot;
 	bus_space_handle_t	 sc_ioh;
 	bus_size_t		 sc_size;
 	void			*sc_ih;
 	void			*sc_conn_ih;
-	SIMPLEQ_HEAD(,usbf_xfer) sc_free_xfers;	/* recycled xfers */
+	SIMPLEQ_HEAD(,usbd_xfer) sc_free_xfers;	/* recycled xfers */
 	u_int32_t		 sc_icr0;	/* enabled EP interrupts */
 	u_int32_t		 sc_icr1;	/* enabled EP interrupts */
 #if 0
@@ -56,7 +56,8 @@ struct pxaudc_softc {
 		EP0_IN
 	}			 sc_ep0state;
 #endif
-	struct pxaudc_pipe	*sc_pipe[PXAUDC_NEP];
+//	struct pxaudc_pipe	*sc_pipe[PXAUDC_NEP];
+	usbd_pipe_handle	sc_pipe[PXAUDC_NEP];
 	int			 sc_npipe;
 
 #ifdef	CPU_XSCALE_PXA250
@@ -92,7 +93,8 @@ struct pxaudc_softc {
 #define	pxaudc_is_host(sc)	0
 #endif
 
-	callout_t callout;
+	callout_t	sc_callout;
+	kmutex_t	sc_lock;
 };
 
 #if 0

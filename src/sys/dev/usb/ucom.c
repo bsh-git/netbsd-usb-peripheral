@@ -66,7 +66,7 @@ __KERNEL_RCSID(0, "$NetBSD: ucom.c,v 1.107 2014/08/10 16:44:36 tls Exp $");
 
 #include "locators.h"
 
-#if NUCOM > 0
+#if NUCOM > 0 || NUPCOM > 0
 
 #ifdef UCOM_DEBUG
 #define DPRINTFN(n, x)	if (ucomdebug > (n)) printf x

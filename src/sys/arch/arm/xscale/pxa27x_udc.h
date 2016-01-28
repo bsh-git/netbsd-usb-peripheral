@@ -27,7 +27,7 @@
 #define PXAUDC_NEP	24	/* total number of endpoints */
 
 struct pxaudc_softc {
-	struct usbf_bus		 sc_bus;
+	struct usbp_bus		 sc_bus;
 	bus_space_tag_t		 sc_iot;
 	bus_space_handle_t	 sc_ioh;
 	bus_size_t		 sc_size;

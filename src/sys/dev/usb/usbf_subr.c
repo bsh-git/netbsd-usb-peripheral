@@ -224,6 +224,8 @@ usbf_new_device(device_t parent, struct usbf_bus *bus, int depth,
 		return USBF_NOMEM;
 	}
 
+	DPRINTF(10,("%s: default_xfer=%p\n", __func__, dev->default_xfer));
+
 	/* Insert device request xfer. */
 	usbf_setup_default_xfer(dev->default_xfer, dev->default_pipe,
 	    NULL, &dev->def_req, 0, 0, usbf_do_request);
@@ -241,6 +243,8 @@ usbf_new_device(device_t parent, struct usbf_bus *bus, int depth,
 	up->portno = port;
 	up->device = dev;
 
+	DPRINTF(10,("%s: before: dev->function=%p\n", __func__, dev->function));
+
 	/* Attach function driver. */
 	err = usbf_probe_and_attach(parent, dev, port);
 	if (err) {
@@ -250,6 +254,9 @@ usbf_new_device(device_t parent, struct usbf_bus *bus, int depth,
 		usbf_remove_device(dev, up);
 
 	}
+
+	DPRINTF(10,("%s: after: dev->function=%p\n", __func__, dev->function));
+
 	return err;
 }
 
@@ -831,7 +838,7 @@ usbf_alloc_xfer(struct usbf_device *dev)
 		return NULL;
 	xfer->device = dev;
 	callout_init(&xfer->timeout_handle, 0);
-	DPRINTF(999,("usbf_alloc_xfer() = %p\n", xfer));
+	DPRINTF(10,("usbf_alloc_xfer() xfer=%p pipe=%p\n", xfer, xfer->pipe));
 	return xfer;
 }
 
@@ -1125,3 +1132,13 @@ usbf_schedsoftintr(struct usbf_bus *bus)
 {
 	softint_schedule(bus->soft);
 }
+
+
+void usbf_debug(struct usbf_device *);
+void
+usbf_debug(struct usbf_device *dev)
+{
+	printf("device=%p  default_xfer=%p\n",
+	       dev, dev->default_xfer);
+}
+	   

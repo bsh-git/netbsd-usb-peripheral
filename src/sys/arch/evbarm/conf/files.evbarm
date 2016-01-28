@@ -37,7 +37,9 @@ include "dev/cardbus/files.cardbus"		#   and CardBus devices
 include "dev/pcmcia/files.pcmcia"		# PCMCIA devices
 include "dev/sdmmc/files.sdmmc"			# SD/MMC devices
 include "dev/scsipi/files.scsipi"		# SCSI devices
-include "dev/usb/files.usb"			# USB devices
+include "dev/usb/files.usb"			# USB devices (host side)
+#include "dev/usb/files.usbf"			# USB devices (peripheral side)
+include "dev/usb/files.usbp"			# USB devices (peripheral side)
 
 #
 # ARM evaluation board specific devices

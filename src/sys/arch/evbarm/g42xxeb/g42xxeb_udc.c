@@ -42,8 +42,7 @@ __KERNEL_RCSID(0, "$NetBSD: g42xxeb_mci.c,v 1.3 2012/01/21 19:44:28 nonaka Exp $
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
 #include <dev/usb/usbdivar.h>
-#include <dev/usb/usbf.h>
-#include <dev/usb/usbfvar.h>
+#include <dev/usb/usbp.h>
 
 #include <arm/xscale/pxa2x0cpu.h>
 #include <arm/xscale/pxa2x0reg.h>
@@ -161,7 +160,7 @@ g42xxeb_udc_intr(void *arg)
 	struct g42xxeb_udc_softc *sc = (struct g42xxeb_udc_softc *)arg;
 	int connected = g42xxeb_udc_is_connected(sc);
 
-	printf("%s: %s\n", device_xname(sc->sc_udc.sc_bus.bdev),
+	printf("%s: %s\n", device_xname(sc->sc_udc.sc_dev),
 	    connected ? "connected" : "not connected");
 
 	return 1;

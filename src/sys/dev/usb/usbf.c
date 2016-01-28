@@ -101,10 +101,21 @@ usbf_status	usbf_set_config(struct usbf_device *, u_int8_t);
 void		usbf_dump_request(struct usbf_device *, usb_device_request_t *);
 #endif
 
+#ifdef	__NetBSD__
 extern struct cfdriver usbf_cd;
 
 CFATTACH_DECL3_NEW(usbf, sizeof(struct usbf_softc),
 		   usbf_match, usbf_attach, NULL, NULL, NULL, NULL, 0);
+
+#else
+struct cfattach usbf_ca = {
+	sizeof(struct usbf_softc), usbf_match, usbf_attach
+};
+
+struct cfdriver usbf_cd = {
+	NULL, "usbf", DV_DULL
+};
+#endif
 /* TODO: add detach, activate, child detach and rescan */
 
 
@@ -303,7 +314,7 @@ usbf_task_thread(void *arg)
 void
 usbf_host_reset(struct usbf_bus *bus)
 {
-	struct usbf_device *dev = bus->usbfctl->sc_port.device;
+	struct usbf_device *dev = bus->usbfctl->sc_port.device;  //XXX
 
 	DPRINTF(0,("usbf_host_reset\n"));
 

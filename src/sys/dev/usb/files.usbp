@@ -4,19 +4,18 @@
 # USB support.
 #
 
-# USB logical device
-device	usbf {}
-attach	usbf at usbdev
-file	dev/usb/usbf.c		usbf	needs-flag
-file	dev/usb/usbf_subr.c	usbf
+# Peripheral-side USB logical device
+device	usbp {}
+attach	usbp at usbdev
+file	dev/usb/usbp.c		usbp	needs-flag
 
 device	cdcef {}
-attach	cdcef at usbf
+attach	cdcef at usbp
 file	dev/usb/if_cdcef.c	cdcef
 
 define	upcom
 
 # emulate FTDI serial driver
 device	upftdi: ucombus
-attach	upftdi at usbf with ucom_p
+attach	upftdi at usbp with ucom_p
 file	dev/usb/upftdi.c	upftdi

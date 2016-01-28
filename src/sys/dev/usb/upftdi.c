@@ -61,23 +61,39 @@ int upftdidebug = 0;
 #endif
 
 
+/*
+ * These are the default number of bytes transferred per frame if the
+ * endpoint doesn't tell us.  The output buffer size is a hard limit
+ * for devices that use a 6-bit size encoding.
+ */
+#define UFTDIIBUFSIZE 64
+#define UFTDIOBUFSIZE 64
+
+
 #define DEVNAME(sc)	device_xname((sc)->sc_fun.dev)
+
+#define	MAXCOMDEVICES  4
 
 struct upftdi_softc {
 	struct usbf_function	sc_fun;
 	struct usbf_config	*sc_config;
-	struct usbf_interface	*sc_iface;
-	struct usbf_endpoint	*sc_ep_in;
-	struct usbf_endpoint	*sc_ep_out;
-	struct usbf_pipe	*sc_pipe_in;
-	struct usbf_pipe	*sc_pipe_out;
-	struct usbf_xfer	*sc_xfer_in;
-	struct usbf_xfer	*sc_xfer_out;
-	void			*sc_buffer_in;
-	void			*sc_buffer_out;
-
-
 	int			sc_rxeof_errors;
+
+	int sc_ncomdevs;
+	struct upftdi_comdev {
+		struct usbf_interface	*iface;
+		struct usbf_endpoint	*ep_in;
+		struct usbf_endpoint	*ep_out;
+		struct usbf_pipe	*pipe_in;
+		struct usbf_pipe	*pipe_out;
+		struct usbf_xfer	*xfer_in;
+		struct usbf_xfer	*xfer_out;
+		void			*buffer_in;
+		void			*buffer_out;
+
+		device_t ucomdev;
+
+	} sc_comdev[MAXCOMDEVICES];
 };
 
 static int	upftdi_match(device_t, cfdata_t, void *);
@@ -98,6 +114,7 @@ void		upftdi_stop(struct upftdi_softc *);
 void		upftdi_start_timeout (void *);
 
 static usbf_status upftdi_set_config(struct usbf_function *, struct usbf_config *);
+static void upftdi_attach_ucom(device_t, struct usbf_device *, int);
 
 
 CFATTACH_DECL_NEW(upftdi, sizeof (struct upftdi_softc),
@@ -106,6 +123,9 @@ CFATTACH_DECL_NEW(upftdi, sizeof (struct upftdi_softc),
 struct usbf_function_methods upftdi_methods = {
 	upftdi_set_config,		/* set_config */
 	upftdi_do_request
+};
+
+static struct ucom_methods upftdi_ucom_methods = {
 };
 
 /*
@@ -132,6 +152,8 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 	struct usbf_attach_arg *uaa = aux;
 	struct usbf_device *dev = uaa->device;
 	usbf_status err;
+	int n_comdevs = 1;
+	int idx;
 	//int s;
 	extern void usbf_debug(struct usbf_device *);
 
@@ -162,23 +184,33 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 
-	err = usbf_add_interface(sc->sc_config, UICLASS_VENDOR,
-	    UICLASS_VENDOR, 0, NULL,
-	    &sc->sc_iface);
-	if (err) {
-		printf(": usbf_add_interface failed\n");
-		return;
-	}
+	for (idx=0; idx < n_comdevs; ++idx) {
+		struct usbf_interface *iface;
+		struct usbf_endpoint *ep_in, *ep_out;
 
-	/* XXX don't use hard-coded values 128 and 16. */
-	err = usbf_add_endpoint(sc->sc_iface, UE_DIR_IN | 1, UE_BULK,
-	    64, 16, &sc->sc_ep_in) ||
-	    usbf_add_endpoint(sc->sc_iface, UE_DIR_OUT | 2, UE_BULK,
-	    64, 16, &sc->sc_ep_out);
-	if (err) {
-		printf(": usbf_add_endpoint failed\n");
-		return;
+		err = usbf_add_interface(sc->sc_config, UICLASS_VENDOR,
+		    UICLASS_VENDOR, 0, NULL, &iface);
+		if (err) {
+			printf(": usbf_add_interface failed\n");
+			break;
+		}
+		/* XXX don't use hard-coded values 128 and 16. */
+		err = usbf_add_endpoint(iface, UE_DIR_IN | 1, UE_BULK,         //XXX
+		    64, 16, &ep_in) ||
+		    usbf_add_endpoint(iface, UE_DIR_OUT | 2, UE_BULK,          //XXX
+			64, 16, &ep_out);
+		if (err) {
+			printf(": usbf_add_endpoint failed\n");
+			break;
+		}
+
+
+		sc->sc_comdev[idx].iface = iface;
+		sc->sc_comdev[idx].ep_in = ep_in;
+		sc->sc_comdev[idx].ep_out = ep_out;
+
 	}
+	n_comdevs = idx;
 
 #if 0
 	usb_cdc_union_descriptor_t udesc;
@@ -205,38 +237,49 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 
-	/* Preallocate xfers and data buffers. */
-	sc->sc_xfer_in = usbf_alloc_xfer(dev);
-	sc->sc_xfer_out = usbf_alloc_xfer(dev);
+	sc->sc_ncomdevs = 0;
+
+	for (idx=0; idx < n_comdevs; ++idx) {
+		struct upftdi_comdev *com;
+
+		com = &sc->sc_comdev[idx];
+		/* Preallocate xfers and data buffers. */
+		com->xfer_in = usbf_alloc_xfer(dev);
+		com->xfer_out = usbf_alloc_xfer(dev);
 
 
-	sc->sc_buffer_in = usbf_alloc_buffer(sc->sc_xfer_in,
-	    UPFTDI_BUFSZ);
+		com->buffer_in = usbf_alloc_buffer(com->xfer_in, UPFTDI_BUFSZ);
+		com->buffer_out = usbf_alloc_buffer(com->xfer_out, UPFTDI_BUFSZ);
+		if (com->buffer_in == NULL || com->buffer_out == NULL) {
+			printf(": usbf_alloc_buffer failed\n");
+			break;
+		}
 
-	sc->sc_buffer_out = usbf_alloc_buffer(sc->sc_xfer_out,
-	    UPFTDI_BUFSZ);
-	if (sc->sc_buffer_in == NULL || sc->sc_buffer_out == NULL) {
-		printf(": usbf_alloc_buffer failed\n");
-		return;
-	}
+		/* Open the bulk pipes. */
+		err = usbf_open_pipe(com->iface,
+		    usbf_endpoint_address(com->ep_out), &com->pipe_out) ||
+		    usbf_open_pipe(com->iface,
+			usbf_endpoint_address(com->ep_in), &com->pipe_in);
+		if (err) {
+			printf(": usbf_open_pipe failed\n");
+			return;
+		}
 
-	/* Open the bulk pipes. */
-	err = usbf_open_pipe(sc->sc_iface,
-	    usbf_endpoint_address(sc->sc_ep_out), &sc->sc_pipe_out) ||
-	    usbf_open_pipe(sc->sc_iface,
-	    usbf_endpoint_address(sc->sc_ep_in), &sc->sc_pipe_in);
-	if (err) {
-		printf(": usbf_open_pipe failed\n");
-		return;
-	}
+		upftdi_attach_ucom(self, dev, idx);
 
-	/* Get ready to receive packets. */
-	usbf_setup_xfer(sc->sc_xfer_out, sc->sc_pipe_out, sc,
-	    sc->sc_buffer_out, UPFTDI_BUFSZ, USBD_SHORT_XFER_OK, 0, upftdi_rxeof);
-	err = usbf_transfer(sc->sc_xfer_out);
-	if (err && err != USBF_IN_PROGRESS) {
-		printf(": usbf_transfer failed\n");
-		return;
+		/* Get ready to receive packets. */
+		usbf_setup_xfer(com->xfer_out, com->pipe_out, sc,
+		    com->buffer_out, UPFTDI_BUFSZ, USBD_SHORT_XFER_OK, 0, upftdi_rxeof);
+		err = usbf_transfer(com->xfer_out);
+		if (err && err != USBF_IN_PROGRESS) {
+			printf(": usbf_transfer failed\n");
+
+			config_detach(com->ucomdev, DETACH_FORCE);
+			/* XXX: release other resources */
+			break;
+		}
+		
+		++sc->sc_ncomdevs;
 	}
 
 #if 0
@@ -247,6 +290,31 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 #endif
 }
 
+
+static void
+upftdi_attach_ucom(device_t self, struct usbf_device *dev, int idx)
+{
+	struct ucom_attach_args uca;
+	struct upftdi_softc *sc = device_private(self);
+
+	uca.portno = FTDI_PIT_SIOA + idx;
+	/* bulkin, bulkout set above */
+	uca.ibufsize = UFTDIIBUFSIZE;
+	uca.ibufsizepad = uca.ibufsize;
+	uca.obufsize = UFTDIOBUFSIZE;
+	uca.opkthdrlen = 0; // sc->sc_hdrlen;
+	uca.device = NULL;
+	uca.iface =  NULL;
+	uca.pdevice = dev;
+	uca.piface = NULL; 		/* XXX */
+	uca.methods = &upftdi_ucom_methods;
+	uca.arg = self;
+	uca.info = NULL;
+
+	sc->sc_comdev[idx].ucomdev = config_found_sm_loc(self, "ucombus", NULL,
+	    &uca, ucomprint, ucomsubmatch);
+
+}
 
 static usbf_status
 upftdi_req_reset(struct usbf_function *fun, usb_device_request_t *req)
@@ -367,6 +435,7 @@ static void
 upftdi_rxeof(struct usbf_xfer *xfer, void *priv,
     usbf_status status)
 {
+#if 0
 	struct upftdi_softc	*sc = priv;
 	int total_len = 0;
 //	int s;
@@ -412,6 +481,7 @@ done:
 		printf("%s: usbf_transfer failed\n", DEVNAME(sc));
 		return;
 	}
+#endif
 }
 
 

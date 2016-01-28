@@ -375,11 +375,15 @@ ld* at sdmmc?				# MMC/SD card
 pxaudc0 at obio?
 
 # USB function support
-usbf*		at pxaudc?		# USB logical device
-cdcef*		at usbf?		# CDC ethernet function
+#usbf*		at pxaudc?		# USB logical device
+#cdcef*		at usbf?		# CDC ethernet function
 #options  	USBF_DEBUG
 #options	CDCEF_DEBUG
 
+usbp*		at pxaudc?		# USB logical device
+cdcef*		at usbp?		# CDC ethernet function
+options  	USBP_DEBUG
+options 	CDCEF_DEBUG
 
 # Pseudo-Devices
 
