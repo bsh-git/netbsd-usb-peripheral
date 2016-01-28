@@ -145,24 +145,6 @@ cdcef_match(device_t parent, cfdata_t cf, void *aux)
 	return UMATCH_GENERIC;
 }
 
-static struct cdcef_softc *xxx = NULL;
-void __CHECK(int);
-void
-__CHECK(int line)
-{
-	if (xxx) {
-		int i;
-		unsigned char *p;
-		printf("line%d: sc_ep_in=%p 0x%x  ", line,
-		       xxx->sc_ep_in, usbp_endpoint_address(xxx->sc_ep_in));
-
-		for (i=0, p = (unsigned char *)(xxx->sc_ep_in->usbd.edesc); i < sizeof *(xxx->sc_ep_in->usbd.edesc); ++i) {
-			printf("%02x ", p[i]);
-		}
-		printf("\n");
-	}
-}
-
 void
 cdcef_attach(device_t parent, device_t self, void *aux)
 {
@@ -176,7 +158,6 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 	u_int16_t macaddr_hi;
 
 
-	xxx = sc;
 	DPRINTF(10, ("%s\n", __func__));
 	
 	/* Set the device identification according to the function. */
@@ -265,9 +246,6 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 
-	printf("%s: ep_in = %p 0x%x pipe_in=%p edesc=%p\n", __func__, sc->sc_ep_in, usbp_endpoint_address(sc->sc_ep_in),
-	       sc->sc_pipe_in, sc->sc_ep_in->usbd.edesc);
-
 	/* Get ready to receive packets. */
 	usbd_setup_xfer(sc->sc_xfer_out, sc->sc_pipe_out, sc,
 	    sc->sc_buffer_out, CDCEF_BUFSZ, USBD_SHORT_XFER_OK, 0, cdcef_rxeof);
@@ -276,9 +254,6 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 		printf(": usbd_transfer failed\n");
 		return;
 	}
-
-	printf("%s: sc_ep_in=%p 0x%x\n", __func__,
-	       sc->sc_ep_in, usbp_endpoint_address(sc->sc_ep_in));
 
 	s = splnet();
 
@@ -309,9 +284,6 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 	printf(": address %s\n", ether_sprintf(sc->sc_arpcom.ac_enaddr));
 #endif
 
-	printf("%s: sc_ep_in=%p 0x%x\n", __func__,
-	       sc->sc_ep_in, usbp_endpoint_address(sc->sc_ep_in));
-
 	ifp = GET_IFP(sc);
 	ifp->if_softc = sc;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
@@ -322,24 +294,12 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 	strlcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
 
 
-	printf("%s: sc_ep_in=%p 0x%x\n", __func__,
-	       sc->sc_ep_in, usbp_endpoint_address(sc->sc_ep_in));
-
 	IFQ_SET_READY(&ifp->if_snd);
 
-	printf("%s: sc_ep_in=%p 0x%x\n", __func__,
-	       sc->sc_ep_in, usbp_endpoint_address(sc->sc_ep_in));
-
 	if_attach(ifp);
-	printf("%s: sc_ep_in=%p 0x%x\n", __func__,
-	       sc->sc_ep_in, usbp_endpoint_address(sc->sc_ep_in));
-
 	ether_ifattach(ifp, sc->sc_ether_addr);
 	splx(s);
 
-	printf("%s: sc_ep_in=%p 0x%x edesc=%p\n", __func__,
-	       sc->sc_ep_in, usbp_endpoint_address(sc->sc_ep_in), sc->sc_ep_in->usbd.edesc);
-	xxx = NULL;
 }
 
 usbd_status
