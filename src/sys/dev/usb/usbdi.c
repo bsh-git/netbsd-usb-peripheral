@@ -161,17 +161,15 @@ usbd_open_pipe_ival(usbd_interface_handle iface, u_int8_t address,
 	usbd_status err;
 	int i;
 
-	DPRINTFN(3,("usbd_open_pipe: iface=%p address=0x%x flags=0x%x\n",
-		    iface, address, flags));
+	DPRINTFN(3,("usbd_open_pipe: iface=%p address=0x%x flags=0x%x NumEndpoints=%d\n",
+		iface, address, flags, iface->idesc->bNumEndpoints));
 
-	printf("%s: %d: idesc=%p\n", __func__, __LINE__, iface->idesc);
 	for (i = 0; i < iface->idesc->bNumEndpoints; i++) {
-		printf("%s: %d: i=%d\n", __func__, __LINE__, i);
 		ep = &iface->endpoints[i];
-		printf("%s: %d: ep=%p\n", __func__, __LINE__, ep);
 
 		if (ep->edesc == NULL)
 			return (USBD_IOERROR);
+		printf("%s: %p 0x%x\n", __func__, ep, ep->edesc->bEndpointAddress);
 		if (ep->edesc->bEndpointAddress == address)
 			goto found;
 	}
