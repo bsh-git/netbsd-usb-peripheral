@@ -85,8 +85,8 @@ struct upftdi_softc {
 	int sc_ncomdevs;
 	struct upftdi_comdev {
 		struct usbp_interface	*iface;
-		struct usbp_endpoint	*ep_in;
-		struct usbp_endpoint	*ep_out;
+		struct usbd_endpoint	*ep_in;
+		struct usbd_endpoint	*ep_out;
 		struct usbd_pipe	*pipe_in;
 		struct usbd_pipe	*pipe_out;
 		struct usbd_xfer	*xfer_in;
@@ -198,7 +198,7 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 
 	for (idx=0; idx < n_comdevs; ++idx) {
 		struct usbp_interface *iface;
-		struct usbp_endpoint *ep_in, *ep_out;
+		struct usbd_endpoint *ep_in, *ep_out;
 
 		err = usbp_add_interface(sc->sc_config, UICLASS_VENDOR,
 		    UICLASS_VENDOR, 0, NULL, &iface);
@@ -271,9 +271,9 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 #if 0
 		/* Open the bulk pipes. */
 		err = usbp_open_pipe(com->iface,
-		    usbp_endpoint_address(com->ep_out), &com->pipe_out) ||
+		    usbd_endpoint_address(com->ep_out), &com->pipe_out) ||
 		    usbp_open_pipe(com->iface,
-			usbp_endpoint_address(com->ep_in), &com->pipe_in);
+			usbd_endpoint_address(com->ep_in), &com->pipe_in);
 		if (err) {
 			printf(": usbf_open_pipe failed\n");
 			return;
@@ -325,8 +325,8 @@ upftdi_attach_ucom(device_t self, struct usbp_device *dev, int idx)
 	uca.opkthdrlen = 0; // sc->sc_hdrlen;
 	uca.device = (struct usbd_device *)dev;
 	uca.iface =  (struct usbd_interface *)sc->sc_comdev[idx].iface;
-	uca.bulkin = usbp_endpoint_index(sc->sc_comdev[idx].ep_in);
-	uca.bulkout = usbp_endpoint_index(sc->sc_comdev[idx].ep_out);
+	uca.bulkin = usbd_endpoint_address(sc->sc_comdev[idx].ep_in);
+	uca.bulkout = usbd_endpoint_address(sc->sc_comdev[idx].ep_out);
 	uca.methods = &upftdi_ucom_methods;
 	uca.arg = self;
 	uca.info = NULL;

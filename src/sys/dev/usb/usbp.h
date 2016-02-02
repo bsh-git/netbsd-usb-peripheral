@@ -63,12 +63,14 @@ struct usbp_bus {
 };
 
 
+#if 0
 struct usbp_endpoint {
 	struct usbd_endpoint usbd;
 
 	struct usbp_interface *iface;
 	SIMPLEQ_ENTRY(usbp_endpoint) next;	// XXX do we really need this?
 };
+#endif
 
 
 void usbp_devinfo_setup(struct usbp_device *dev, u_int8_t devclass,
@@ -86,7 +88,7 @@ usbd_status usbp_add_interface(struct usbp_config *uc, u_int8_t bInterfaceClass,
 usbd_status
 usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
 		  u_int8_t bmAttributes, u_int16_t wMaxPacketSize, u_int8_t bInterval,
-		  struct usbp_endpoint **uep);
+		  struct usbd_endpoint **uep);
 
 int usbp_interface_number(struct usbp_interface *iface);
 u_int8_t usbd_endpoint_address(struct usbd_endpoint *);
@@ -94,10 +96,12 @@ u_int8_t usbd_endpoint_address(struct usbd_endpoint *);
 #define usbd_endpoint_dir(e)	UE_GET_DIR(usbd_endpoint_address((e)))
 #define	usbd_endpoint_type(e)	UE_GET_XFERTYPE(usbd_endpoint_attributes(e))
 
+#if 0
 #define	usbp_endpoint_address(e)	usbd_endpoint_address(&e->usbd)
 #define	usbp_endpoint_index(e)	usbd_endpoint_index(&e->usbd)
 #define	usbp_endpoint_dir(e)	usbd_endpoint_dir(&e->usbd)
 #define usbp_endpoint_type(e)	usbd_endpoint_type(&e->usbd)
+#endif
 
 static inline u_int8_t
 usbd_endpoint_attributes(struct usbd_endpoint *endpoint)
@@ -105,7 +109,7 @@ usbd_endpoint_attributes(struct usbd_endpoint *endpoint)
 	return endpoint->edesc->bmAttributes;
 }
 
-#define	usbp_endpoint_attributes(endpoint)	usbd_endpoint_attributes(&endpoint->usbd)
+//#define	usbp_endpoint_attributes(endpoint)	usbd_endpoint_attributes(&endpoint->usbd)
 
 usbd_status usbp_open_pipe(struct usbp_interface *iface, u_int8_t address,
 			   struct usbd_pipe **pipe);

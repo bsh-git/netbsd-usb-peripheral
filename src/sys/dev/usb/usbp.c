@@ -76,7 +76,7 @@ struct usbp_interface {
 
 	struct usbp_config *config;
 	SIMPLEQ_ENTRY(usbp_interface) next;
-	SIMPLEQ_HEAD(, usbp_endpoint) endpoint_head;
+//	SIMPLEQ_HEAD(, usbp_endpoint) endpoint_head;
 };
 
 struct usbp_config {
@@ -141,7 +141,7 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 #endif
 	);
 static usbd_status usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
-				   struct usbp_endpoint *ep, int ival, struct usbd_pipe **pipe);
+				   struct usbd_endpoint *ep, int ival, struct usbd_pipe **pipe);
 
 static void usbp_setup_default_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
     void *priv, usb_device_request_t *req, u_int16_t flags,
@@ -195,6 +195,7 @@ usbp_attach(device_t parent, device_t self, void *aux)
 	sc->sc_dev = self;
 	sc->sc_bus = uaa->bus;
 	sc->sc_bus->usbd.usbctl = self;
+	sc->sc_bus->usbd.pipe_size = sizeof (struct usbd_pipe);
 
 	usbrev = sc->sc_bus->usbd.usbrev;
 	aprint_normal(": USB revision %s", usbrev_str[usbrev]);
@@ -360,7 +361,7 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 	dev->usbd.def_ep_desc.bInterval = 0;
 
 	/* Establish the default pipe. */
-	err = usbp_setup_pipe(dev, NULL, (struct usbp_endpoint *)&dev->usbd.def_ep, 0, &default_pipe);
+	err = usbp_setup_pipe(dev, NULL, (struct usbd_endpoint *)&dev->usbd.def_ep, 0, &default_pipe);
 	if (err)
 		goto bad;
 
@@ -444,7 +445,7 @@ usbp_devinfo_setup(struct usbp_device *dev, u_int8_t devclass,
 
 usbd_status
 usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
-    struct usbp_endpoint *ep, int ival, struct usbd_pipe **pipe)
+    struct usbd_endpoint *ep, int ival, struct usbd_pipe **pipe)
 {
 	struct usbd_pipe *p;
 	usbd_status err;
@@ -455,8 +456,8 @@ usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
 
 	p->device = &dev->usbd;
 	p->iface = &iface->usbd;
-	p->endpoint = &ep->usbd;
-	ep->usbd.refcnt++;
+	p->endpoint = ep;
+	ep->refcnt++;
 	p->aborting = 0;
 	p->running = 0;
 	p->refcnt = 1;
@@ -700,42 +701,46 @@ usbp_get_descriptor(struct usbp_device *dev, usb_device_request_t *req,
 	}
 }
 
-static struct usbp_endpoint *
+static struct usbd_endpoint *
 usbp_iface_endpoint(struct usbp_interface *iface, u_int8_t address)
 {
-	struct usbp_endpoint *ep;
+	struct usbd_endpoint *ep;
+	int i;
 
-	SIMPLEQ_FOREACH(ep, &iface->endpoint_head, next) {
-		if (ep->usbd.edesc->bEndpointAddress == address)
+	for (i = 0; i < iface->usbd.idesc->bNumEndpoints; i++) {
+		ep = &iface->usbd.endpoints[i];
+
+		if (ep->edesc == NULL)
+			continue;	// XXX error
+		if (ep->edesc->bEndpointAddress == address)
 			return ep;
 	}
 	return NULL;
 }
 
 
-static struct usbp_endpoint *
+static struct usbd_endpoint *
 usbp_config_endpoint(struct usbp_config *cfg, u_int8_t address)
 {
 	struct usbp_interface *iface;
-	struct usbp_endpoint *ep;
+	struct usbd_endpoint *ep;
 
 	SIMPLEQ_FOREACH(iface, &cfg->iface_head, next) {
-		SIMPLEQ_FOREACH(ep, &iface->endpoint_head, next) {
-			if (ep->usbd.edesc->bEndpointAddress == address)
-				return ep;
-		}
+		ep = usbp_iface_endpoint(iface, address);
+		if (ep)
+			return ep;
 	}
 	return NULL;
 }
 
 
 static void
-usbp_set_endpoint_halt(struct usbp_endpoint *endpoint)
+usbp_set_endpoint_halt(struct usbd_endpoint *endpoint)
 {
 }
 
 static void
-usbp_clear_endpoint_halt(struct usbp_endpoint *endpoint)
+usbp_clear_endpoint_halt(struct usbd_endpoint *endpoint)
 {
 }
 
@@ -751,7 +756,7 @@ static usbd_status
 usbp_set_endpoint_feature(struct usbp_config *cfg, u_int8_t address,
     u_int16_t value)
 {
-	struct usbp_endpoint *ep;
+	struct usbd_endpoint *ep;
 
 	DPRINTF(0,("usbf_set_endpoint_feature: cfg=%p address=%#x"
 	    " value=%#x\n", cfg, address, value));
@@ -774,7 +779,7 @@ static usbd_status
 usbp_clear_endpoint_feature(struct usbp_config *cfg, u_int8_t address,
     u_int16_t value)
 {
-	struct usbp_endpoint *ep;
+	struct usbd_endpoint *ep;
 
 	DPRINTF(0,("usbf_clear_endpoint_feature: cfg=%p address=%#x"
 	    " value=%#x\n", cfg, address, value));
@@ -1219,10 +1224,11 @@ usbp_add_interface(struct usbp_config *uc, u_int8_t bInterfaceClass,
 	}
 
 	ui->config = uc;
+	ui->usbd.device = &uc->uc_device->usbd;
 	ui->usbd.idesc = id;
 	LIST_INIT(&ui->usbd.pipes);
-	SIMPLEQ_INIT(&ui->endpoint_head);
-	ui->usbd.endpoints = malloc(sizeof (struct usbp_endpoint) * 16,     // XXX
+	//SIMPLEQ_INIT(&ui->endpoint_head);
+	ui->usbd.endpoints = malloc(sizeof (struct usbd_endpoint) * 16,     // XXX
 	    M_USB, M_NOWAIT | M_ZERO);
 	if (ui->usbd.endpoints == NULL) {
 		free(id, M_USB);
@@ -1248,9 +1254,9 @@ usbp_add_interface(struct usbp_config *uc, u_int8_t bInterfaceClass,
 usbd_status
 usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
     u_int8_t bmAttributes, u_int16_t wMaxPacketSize, u_int8_t bInterval,
-    struct usbp_endpoint **uep)
+    struct usbd_endpoint **uep)
 {
-	struct usbp_endpoint *ue;
+	struct usbd_endpoint *ue;
 	usb_endpoint_descriptor_t *ed;
 	int num_ep;
 
@@ -1259,9 +1265,10 @@ usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
 
 	num_ep = ui->usbd.idesc->bNumEndpoints;
 
-	ue = malloc(sizeof *ue, M_USB, M_NOWAIT | M_ZERO);
-	if (ue == NULL)
-		return USBD_NOMEM;
+	if (num_ep >= 16)
+		return USBD_NOMEM;	// XXX
+
+	ue = &ui->usbd.endpoints[num_ep];
 	ed = malloc(sizeof *ed, M_USB, M_NOWAIT | M_ZERO);
 //	ed = kmem_zalloc(sizeof *ed, KM_NOSLEEP);
 	if (ed == NULL) {
@@ -1269,8 +1276,8 @@ usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
 		return USBD_NOMEM;
 	}
 
-	ue->iface = ui;
-	ue->usbd.edesc = ed;
+	//ue->iface = ui;
+	ue->edesc = ed;
 
 	ed->bLength = USB_ENDPOINT_DESCRIPTOR_SIZE;
 	ed->bDescriptorType = UDESC_ENDPOINT;
@@ -1279,10 +1286,9 @@ usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
 	USETW(ed->wMaxPacketSize, wMaxPacketSize);
 	ed->bInterval = bInterval;
 
-	SIMPLEQ_INSERT_TAIL(&ui->endpoint_head, ue, next);
+	//SIMPLEQ_INSERT_TAIL(&ui->endpoint_head, ue, next);
 
-	ui->usbd.endpoints[num_ep++] = &ue->usbd;
-	ui->usbd.idesc->bNumEndpoints = num_ep;
+	ui->usbd.idesc->bNumEndpoints++;
 
 	*uep = ue;
 	return USBD_NORMAL_COMPLETION;
@@ -1296,42 +1302,46 @@ usbd_status
 usbp_end_config(struct usbp_config *uc)
 {
 	struct usbp_interface *ui;
-	struct usbp_endpoint *ue;
+	struct usbd_endpoint *ue;
 //	usb_descriptor_t *d;
 	usbd_status err = USBD_NORMAL_COMPLETION;
-	size_t newsize, idx;
+	size_t newsize, offset;
 	unsigned char *newdesc;
+	int i;
 
 	if (uc->uc_closed)
 		return USBD_INVAL;
 
 	
 	newsize = uc->uc_cdesc_size;
+	
 	SIMPLEQ_FOREACH(ui, &uc->iface_head, next) {
 		newsize += ui->usbd.idesc->bLength;
-		SIMPLEQ_FOREACH(ue, &ui->endpoint_head, next) {
-			newsize += ue->usbd.edesc->bLength;
+		for (i = 0; i < ui->usbd.idesc->bNumEndpoints; i++) {
+			ue = &ui->usbd.endpoints[i];
+			newsize += ue->edesc->bLength;
 		}
 	}
 
 	newdesc = realloc(uc->uc_cdesc, newsize, M_USB, M_NOWAIT | M_ZERO);
 		
-	idx = uc->uc_cdesc_size;
+	offset = uc->uc_cdesc_size;
 	SIMPLEQ_FOREACH(ui, &uc->iface_head, next) {
 		size_t len;
 
 		len = ui->usbd.idesc->bLength;
-		memcpy(newdesc + idx, ui->usbd.idesc, len);
+		memcpy(newdesc + offset, ui->usbd.idesc, len);
 		free(ui->usbd.idesc, M_USB);
-		ui->usbd.idesc = (usb_interface_descriptor_t *)(newdesc + idx);
-		idx += len;
+		ui->usbd.idesc = (usb_interface_descriptor_t *)(newdesc + offset);
+		offset += len;
 
-		SIMPLEQ_FOREACH(ue, &ui->endpoint_head, next) {
-			len = ue->usbd.edesc->bLength;
-			memcpy(newdesc + idx, ue->usbd.edesc, len);
-			free(ue->usbd.edesc, M_USB);
-			ue->usbd.edesc = (usb_endpoint_descriptor_t *)(newdesc + idx);
-			idx += len;
+		for (i = 0; i < ui->usbd.idesc->bNumEndpoints; i++) {
+			ue = &ui->usbd.endpoints[i];
+			len = ue->edesc->bLength;
+			memcpy(newdesc + offset, ue->edesc, len);
+			free(ue->edesc, M_USB);
+			ue->edesc = (usb_endpoint_descriptor_t *)(newdesc + offset);
+			offset += len;
 		}
 	}
 
@@ -1377,7 +1387,7 @@ usbd_status
 usbp_open_pipe_ival(struct usbp_interface *iface, u_int8_t address,
     struct usbd_pipe **pipe, int ival)
 {
-	struct usbp_endpoint *ep;
+	struct usbd_endpoint *ep;
 	struct usbd_pipe *p;
 	usbd_status err;
 

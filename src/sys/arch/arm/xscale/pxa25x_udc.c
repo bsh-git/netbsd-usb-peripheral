@@ -377,9 +377,8 @@ pxa25xudc_enable(struct pxaudc_softc *sc)
 
 	for (i = 1; i < sc->sc_npipe; i++) {
 		if (sc->sc_pipe[i] != NULL)  {
-			struct usbp_endpoint *ep =
-			    (struct usbp_endpoint *)sc->sc_pipe[i]->endpoint;
-			int dir = usbp_endpoint_dir(ep);
+			struct usbd_endpoint *ep = sc->sc_pipe[i]->endpoint;
+			int dir = usbd_endpoint_dir(ep);
 
 			icr &= ~(1 << i);
 
@@ -623,9 +622,9 @@ void
 pxaudc_write(struct pxaudc_softc *sc, struct usbd_xfer *xfer)
 {
 	u_int8_t *p;
-	struct usbp_endpoint *endpoint = (struct usbp_endpoint *)xfer->pipe->endpoint;
-	int epidx = usbp_endpoint_index(endpoint);
-	int maxp = UGETW(endpoint->usbd.edesc->wMaxPacketSize);
+	struct usbd_endpoint *endpoint = xfer->pipe->endpoint;
+	int epidx = usbd_endpoint_index(endpoint);
+	int maxp = UGETW(endpoint->edesc->wMaxPacketSize);
 	int fifo_length = udc_ep_regs[epidx].fifo_length;
 	u_int32_t csr, csr_o;
 	bus_size_t datareg = udc_ep_regs[epidx].data;
@@ -841,7 +840,7 @@ static void
 pxaudc_epN_intr(struct pxaudc_softc *sc, int ep)
 {
 	struct usbd_pipe *pipe;
-	struct usbp_endpoint *endpoint;
+	struct usbd_endpoint *endpoint;
 	int dir;
 
 	DPRINTF(10, ("ep%d intr ppipe=%p\n", ep, sc->sc_pipe[ep]));
@@ -851,8 +850,8 @@ pxaudc_epN_intr(struct pxaudc_softc *sc, int ep)
 	if (pipe == NULL)
 		return;
 
-	endpoint = (struct usbp_endpoint *)pipe->endpoint;
-	dir = usbp_endpoint_dir(endpoint);
+	endpoint = pipe->endpoint;
+	dir = usbd_endpoint_dir(endpoint);
 
 	if (dir == UE_DIR_IN) {
 		uint32_t r = CSR_READ_4(sc, USBDC_UDCCS(ep));
@@ -976,18 +975,18 @@ usbd_status
 pxaudc_open(struct usbd_pipe *pipe)
 {
 	struct pxaudc_softc *sc = (struct pxaudc_softc *)pipe->device->bus;
-	struct usbp_endpoint *endpoint = (struct usbp_endpoint *)pipe->endpoint;
+	struct usbd_endpoint *endpoint = pipe->endpoint;
 	int ep_idx;
 	int s;
 
-	ep_idx = usbp_endpoint_index(endpoint);
+	ep_idx = usbd_endpoint_index(endpoint);
 	if (ep_idx >= PXAUDC_NEP)
 		return USBD_BAD_ADDRESS;
 
 	DPRINTF(10,("pxaudc_open  ep%d sc=%p npipe=%d\n", ep_idx, sc, sc->sc_npipe));
 	s = splhardusb();
 
-	switch (usbp_endpoint_type(endpoint)) {
+	switch (usbd_endpoint_type(endpoint)) {
 	case UE_CONTROL:
 		pipe->methods = &pxaudc_ctrl_methods;
 		break;
@@ -1140,7 +1139,7 @@ pxaudc_ctrl_abort(struct usbd_xfer *xfer)
 	 * XXX are two xfers in the FIFO and we only want to
 	 * XXX ignore one? */
 #ifdef notyet
-	pxaudc_flush(sc, usbp_endpoint_address(pipe->endpoint));
+	pxaudc_flush(sc, usbd_endpoint_address(pipe->endpoint));
 #endif
 	/* XXX we're not doing DMA and the soft interrupt routine does not
 	   XXX need to clean up anything. */

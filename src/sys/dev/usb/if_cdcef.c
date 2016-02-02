@@ -68,8 +68,8 @@ struct cdcef_softc {
 	struct usbp_function	sc_dev;
 	struct usbp_config	*sc_config;
 	struct usbp_interface	*sc_iface;
-	struct usbp_endpoint	*sc_ep_in;
-	struct usbp_endpoint	*sc_ep_out;
+	struct usbd_endpoint	*sc_ep_in;
+	struct usbd_endpoint	*sc_ep_out;
 	struct usbd_pipe	*sc_pipe_in;
 	struct usbd_pipe	*sc_pipe_out;
 	struct usbd_xfer	*sc_xfer_in;
@@ -238,9 +238,9 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 
 	/* Open the bulk pipes. */
 	err = usbp_open_pipe(sc->sc_iface,
-	    usbp_endpoint_address(sc->sc_ep_out), &sc->sc_pipe_out) ||
+	    usbd_endpoint_address(sc->sc_ep_out), &sc->sc_pipe_out) ||
 	    usbp_open_pipe(sc->sc_iface,
-	    usbp_endpoint_address(sc->sc_ep_in), &sc->sc_pipe_in);
+	    usbd_endpoint_address(sc->sc_ep_in), &sc->sc_pipe_in);
 	if (err) {
 		printf(": usbf_open_pipe failed\n");
 		return;
