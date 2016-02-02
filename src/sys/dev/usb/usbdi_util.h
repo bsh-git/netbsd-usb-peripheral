@@ -103,4 +103,10 @@ const usb_cdc_descriptor_t *usb_find_desc_if(usbd_device_handle dev, int type,
 					 usb_interface_descriptor_t *id);
 #define USBD_CDCSUBTYPE_ANY (~0)
 
+
+/*
+ * USB task
+ */
+void usb_task_init(void);
+
 #endif /* _USBDI_UTIL_H_ */

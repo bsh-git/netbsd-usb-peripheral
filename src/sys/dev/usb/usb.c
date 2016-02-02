@@ -75,7 +75,7 @@ __KERNEL_RCSID(0, "$NetBSD: usb.c,v 1.154 2014/07/25 08:10:39 dholland Exp $");
 #ifdef USB_DEBUG
 #define DPRINTF(x)	if (usbdebug) printf x
 #define DPRINTFN(n,x)	if (usbdebug>(n)) printf x
-int	usbdebug = 0;
+extern int usbdebug;
 /*
  * 0  - do usual exploration
  * 1  - do not use timeout exploration
@@ -99,16 +99,6 @@ struct usb_softc {
 
 	char		sc_dying;
 };
-
-struct usb_taskq {
-	TAILQ_HEAD(, usb_task) tasks;
-	kmutex_t lock;
-	kcondvar_t cv;
-	struct lwp *task_thread_lwp;
-	const char *name;
-};
-
-static struct usb_taskq usb_taskq[USB_NUM_TASKQS];
 
 dev_type_open(usbopen);
 dev_type_close(usbclose);
@@ -135,7 +125,6 @@ const struct cdevsw usb_cdevsw = {
 Static void	usb_discover(struct usb_softc *);
 Static void	usb_create_event_thread(device_t);
 Static void	usb_event_thread(void *);
-Static void	usb_task_thread(void *);
 
 #define USB_MAX_EVENTS 100
 struct usb_event_q {
@@ -178,8 +167,6 @@ CFATTACH_DECL3_NEW(usb, sizeof(struct usb_softc),
     usb_match, usb_attach, usb_detach, usb_activate, NULL, usb_childdet,
     DVF_DETACH_SHUTDOWN);
 
-static const char *taskq_names[] = USB_TASKQ_NAMES;
-
 int
 usb_match(device_t parent, cfdata_t match, void *aux)
 {
@@ -199,7 +186,6 @@ usb_attach(device_t parent, device_t self, void *aux)
 
 	aprint_naive("\n");
 	aprint_normal(": USB revision %s", usbrev_str[usbrev]);
-
 	switch (usbrev) {
 	case USBREV_1_0:
 	case USBREV_1_1:
@@ -232,35 +218,11 @@ usb_attach(device_t parent, device_t self, void *aux)
 static int
 usb_once_init(void)
 {
-	struct usb_taskq *taskq;
-	int i;
-
 	selinit(&usb_selevent);
 	mutex_init(&usb_event_lock, MUTEX_DEFAULT, IPL_NONE);
 	cv_init(&usb_event_cv, "usbrea");
 
-	for (i = 0; i < USB_NUM_TASKQS; i++) {
-		taskq = &usb_taskq[i];
-
-		TAILQ_INIT(&taskq->tasks);
-		/*
-		 * Since USB task methods usb_{add,rem}_task are callable
-		 * from any context, we have to make this lock a spinlock.
-		 */
-		mutex_init(&taskq->lock, MUTEX_DEFAULT, IPL_USB);
-		cv_init(&taskq->cv, "usbtsk");
-		taskq->name = taskq_names[i];
-		if (kthread_create(PRI_NONE, KTHREAD_MPSAFE, NULL,
-		    usb_task_thread, taskq, &taskq->task_thread_lwp,
-		    "%s", taskq->name)) {
-			printf("unable to create task thread: %s\n", taskq->name);
-			panic("usb_create_event_thread task");
-		}
-		/*
-		 * XXX we should make sure these threads are alive before
-		 * end up using them in usb_doattach().
-		 */
-	}
+	usb_task_init();
 	return 0;
 }
 
@@ -348,53 +310,6 @@ usb_create_event_thread(device_t self)
 	}
 }
 
-/*
- * Add a task to be performed by the task thread.  This function can be
- * called from any context and the task will be executed in a process
- * context ASAP.
- */
-void
-usb_add_task(usbd_device_handle dev, struct usb_task *task, int queue)
-{
-	struct usb_taskq *taskq;
-
-	KASSERT(0 <= queue);
-	KASSERT(queue < USB_NUM_TASKQS);
-	taskq = &usb_taskq[queue];
-	mutex_enter(&taskq->lock);
-	if (atomic_cas_uint(&task->queue, USB_NUM_TASKQS, queue) ==
-	    USB_NUM_TASKQS) {
-		DPRINTFN(2,("usb_add_task: task=%p\n", task));
-		TAILQ_INSERT_TAIL(&taskq->tasks, task, next);
-		cv_signal(&taskq->cv);
-	} else {
-		DPRINTFN(3,("usb_add_task: task=%p on q\n", task));
-	}
-	mutex_exit(&taskq->lock);
-}
-
-/*
- * XXX This does not wait for completion!  Most uses need such an
- * operation.  Urgh...
- */
-void
-usb_rem_task(usbd_device_handle dev, struct usb_task *task)
-{
-	unsigned queue;
-
-	while ((queue = task->queue) != USB_NUM_TASKQS) {
-		struct usb_taskq *taskq = &usb_taskq[queue];
-		mutex_enter(&taskq->lock);
-		if (__predict_true(task->queue == queue)) {
-			TAILQ_REMOVE(&taskq->tasks, task, next);
-			task->queue = USB_NUM_TASKQS;
-			mutex_exit(&taskq->lock);
-			break;
-		}
-		mutex_exit(&taskq->lock);
-	}
-}
-
 void
 usb_event_thread(void *arg)
 {
@@ -439,42 +354,6 @@ usb_event_thread(void *arg)
 	kthread_exit(0);
 }
 
-void
-usb_task_thread(void *arg)
-{
-	struct usb_task *task;
-	struct usb_taskq *taskq;
-	bool mpsafe;
-
-	taskq = arg;
-	DPRINTF(("usb_task_thread: start taskq %s\n", taskq->name));
-
-	mutex_enter(&taskq->lock);
-	for (;;) {
-		task = TAILQ_FIRST(&taskq->tasks);
-		if (task == NULL) {
-			cv_wait(&taskq->cv, &taskq->lock);
-			task = TAILQ_FIRST(&taskq->tasks);
-		}
-		DPRINTFN(2,("usb_task_thread: woke up task=%p\n", task));
-		if (task != NULL) {
-			mpsafe = ISSET(task->flags, USB_TASKQ_MPSAFE);
-			TAILQ_REMOVE(&taskq->tasks, task, next);
-			task->queue = USB_NUM_TASKQS;
-			mutex_exit(&taskq->lock);
-
-			if (!mpsafe)
-				KERNEL_LOCK(1, curlwp);
-			task->fun(task->arg);
-			/* Can't dereference task after this point.  */
-			if (!mpsafe)
-				KERNEL_UNLOCK_ONE(curlwp);
-
-			mutex_enter(&taskq->lock);
-		}
-	}
-	mutex_exit(&taskq->lock);
-}
 
 int
 usbctlprint(void *aux, const char *pnp)

@@ -59,6 +59,9 @@ __KERNEL_RCSID(0, "$NetBSD: usb_subr.c,v 1.196 2014/02/17 07:34:21 skrll Exp $")
 #include <dev/usb/usb_quirks.h>
 #include <dev/usb/usb_verbose.h>
 
+/* UTF-8 encoding stuff */
+#include <fs/unicode.h>
+
 #include "locators.h"
 
 #ifdef USB_DEBUG
@@ -84,29 +87,6 @@ Static int usbd_ifprint(void *, const char *);
 Static void usbd_free_iface_data(usbd_device_handle, int);
 
 uint32_t usb_cookie_no = 0;
-
-Static const char * const usbd_error_strs[] = {
-	"NORMAL_COMPLETION",
-	"IN_PROGRESS",
-	"PENDING_REQUESTS",
-	"NOT_STARTED",
-	"INVAL",
-	"NOMEM",
-	"CANCELLED",
-	"BAD_ADDRESS",
-	"IN_USE",
-	"NO_ADDR",
-	"SET_ADDR_FAILED",
-	"NO_POWER",
-	"TOO_DEEP",
-	"IOERROR",
-	"NOT_CONFIGURED",
-	"TIMEOUT",
-	"SHORT_XFER",
-	"STALLED",
-	"INTERRUPTED",
-	"XXX",
-};
 
 void usb_load_verbose(void);
 
@@ -141,19 +121,6 @@ void get_usb_product_stub(char *p, size_t l, usb_vendor_id_t v_id,
 	usb_load_verbose();
 	if (usb_verbose_loaded)
 		get_usb_product(p, l, v_id, p_id);
-}
-
-const char *
-usbd_errstr(usbd_status err)
-{
-	static char buffer[5];
-
-	if (err < USBD_ERROR_MAX) {
-		return usbd_error_strs[err];
-	} else {
-		snprintf(buffer, sizeof buffer, "%d", err);
-		return buffer;
-	}
 }
 
 usbd_status
@@ -730,51 +697,6 @@ usbd_set_config_index(usbd_device_handle dev, int index, int msg)
 }
 
 /* XXX add function for alternate settings */
-
-usbd_status
-usbd_setup_pipe(usbd_device_handle dev, usbd_interface_handle iface,
-		struct usbd_endpoint *ep, int ival, usbd_pipe_handle *pipe)
-{
-	return usbd_setup_pipe_flags(dev, iface, ep, ival, pipe, 0);
-}
-
-usbd_status
-usbd_setup_pipe_flags(usbd_device_handle dev, usbd_interface_handle iface,
-    struct usbd_endpoint *ep, int ival, usbd_pipe_handle *pipe, uint8_t flags)
-{
-	usbd_pipe_handle p;
-	usbd_status err;
-
-	p = malloc(dev->bus->pipe_size, M_USB, M_NOWAIT);
-	DPRINTFN(1,("usbd_setup_pipe: dev=%p iface=%p ep=%p pipe=%p\n",
-		    dev, iface, ep, p));
-	if (p == NULL)
-		return (USBD_NOMEM);
-	p->device = dev;
-	p->iface = iface;
-	p->endpoint = ep;
-	ep->refcnt++;
-	p->refcnt = 1;
-	p->intrxfer = NULL;
-	p->running = 0;
-	p->aborting = 0;
-	p->repeat = 0;
-	p->interval = ival;
-	p->flags = flags;
-	SIMPLEQ_INIT(&p->queue);
-	err = dev->bus->methods->open_pipe(p);
-	if (err) {
-		DPRINTFN(-1,("usbd_setup_pipe: endpoint=0x%x failed, error="
-			 "%s\n",
-			 ep->edesc->bEndpointAddress, usbd_errstr(err)));
-		free(p, M_USB);
-		return (err);
-	}
-	usb_init_task(&p->async_task, usbd_clear_endpoint_stall_task, p,
-	    USB_TASKQ_MPSAFE);
-	*pipe = p;
-	return (USBD_NORMAL_COMPLETION);
-}
 
 /* Abort the device control pipe. */
 void
@@ -1613,4 +1535,101 @@ usb_disconnect_port(struct usbd_port *up, device_t parent, int flags)
 	up->device = NULL;
 	usb_free_device(dev);
 	return 0;
+}
+
+/* XXXX use altno */
+usbd_status
+usbd_set_interface(usbd_interface_handle iface, int altidx)
+{
+	usb_device_request_t req;
+	usbd_status err;
+	void *endpoints;
+
+	if (LIST_FIRST(&iface->pipes) != 0)
+		return (USBD_IN_USE);
+
+	endpoints = iface->endpoints;
+	err = usbd_fill_iface_data(iface->device, iface->index, altidx);
+	if (err)
+		return (err);
+
+	/* new setting works, we can free old endpoints */
+	if (endpoints != NULL)
+		free(endpoints, M_USB);
+
+#ifdef DIAGNOSTIC
+	if (iface->idesc == NULL) {
+		printf("usbd_set_interface: NULL pointer\n");
+		return (USBD_INVAL);
+	}
+#endif
+
+	req.bmRequestType = UT_WRITE_INTERFACE;
+	req.bRequest = UR_SET_INTERFACE;
+	USETW(req.wValue, iface->idesc->bAlternateSetting);
+	USETW(req.wIndex, iface->idesc->bInterfaceNumber);
+	USETW(req.wLength, 0);
+	return (usbd_do_request(iface->device, &req, 0));
+}
+
+usbd_status
+usbd_get_string(usbd_device_handle dev, int si, char *buf)
+{
+	return usbd_get_string0(dev, si, buf, 1);
+}
+
+usbd_status
+usbd_get_string0(usbd_device_handle dev, int si, char *buf, int unicode)
+{
+	int swap = dev->quirks->uq_flags & UQ_SWAP_UNICODE;
+	usb_string_descriptor_t us;
+	char *s;
+	int i, n;
+	u_int16_t c;
+	usbd_status err;
+	int size;
+
+	buf[0] = '\0';
+	if (si == 0)
+		return (USBD_INVAL);
+	if (dev->quirks->uq_flags & UQ_NO_STRINGS)
+		return (USBD_STALLED);
+	if (dev->langid == USBD_NOLANG) {
+		/* Set up default language */
+		err = usbd_get_string_desc(dev, USB_LANGUAGE_TABLE, 0, &us,
+		    &size);
+		if (err || size < 4) {
+			DPRINTFN(-1,("usbd_get_string: getting lang failed, using 0\n"));
+			dev->langid = 0; /* Well, just pick something then */
+		} else {
+			/* Pick the first language as the default. */
+			dev->langid = UGETW(us.bString[0]);
+		}
+	}
+	err = usbd_get_string_desc(dev, si, dev->langid, &us, &size);
+	if (err)
+		return (err);
+	s = buf;
+	n = size / 2 - 1;
+	if (unicode) {
+		for (i = 0; i < n; i++) {
+			c = UGETW(us.bString[i]);
+			if (swap)
+				c = (c >> 8) | (c << 8);
+			s += wput_utf8(s, 3, c);
+		}
+		*s++ = 0;
+	}
+#ifdef COMPAT_30
+	else {
+		for (i = 0; i < n; i++) {
+			c = UGETW(us.bString[i]);
+			if (swap)
+				c = (c >> 8) | (c << 8);
+			*s++ = (c < 0x80) ? c : '?';
+		}
+		*s++ = 0;
+	}
+#endif
+	return (USBD_NORMAL_COMPLETION);
 }
