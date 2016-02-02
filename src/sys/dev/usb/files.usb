@@ -58,7 +58,7 @@ file	dev/usb/umidi_quirks.c		umidi
 # Modem and com serial port
 device	ucom
 attach	ucom at ucombus
-file	dev/usb/ucom.c			ucom | ucom_h | ucom_p | ucombus		needs-flag
+file	dev/usb/ucom.c			ucom | ucombus		needs-flag
 
 
 # Generic devices
@@ -311,7 +311,7 @@ file	dev/usb/umodem.c		umodem
 
 # FTDI serial driver
 device	uftdi: ucombus
-attach	uftdi at usbdevif with ucom_h
+attach	uftdi at usbdevif
 file	dev/usb/uftdi.c			uftdi
 
 # Prolific PL2303 serial driver
