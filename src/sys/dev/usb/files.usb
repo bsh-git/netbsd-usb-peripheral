@@ -23,8 +23,8 @@ define	usbifif { [port = -1], [configuration = -1], [interface = -1],
 device	usb: usbroothubif
 attach	usb at usbus
 file	dev/usb/usb.c			usb			needs-flag
-file	dev/usb/usbdi.c			usb
-file	dev/usb/usbdi_util.c		usb
+file	dev/usb/usbdi.c			usb | usbp
+file	dev/usb/usbdi_util.c		usb | usbp
 file	dev/usb/usb_cmn.c		usb | usbp
 file	dev/usb/usb_mem.c		(usb & usb_dma) | usbp
 file	dev/usb/usb_subr.c		usb

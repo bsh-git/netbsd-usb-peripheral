@@ -17,5 +17,5 @@ define	upcom
 
 # emulate FTDI serial driver
 device	upftdi: ucombus
-attach	upftdi at usbp with ucom_p
+attach	upftdi at usbp
 file	dev/usb/upftdi.c	upftdi

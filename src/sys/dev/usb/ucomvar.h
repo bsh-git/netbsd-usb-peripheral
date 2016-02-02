@@ -86,8 +86,6 @@ struct ucom_methods {
 #define	UMSR_DDSR	0x02	/* DSR has changed state */
 #define	UMSR_DCTS	0x01	/* CTS has changed state */
 
-struct usbf_device;
-
 struct ucom_attach_args {
 	int portno;
 	int bulkin;
@@ -101,10 +99,6 @@ struct ucom_attach_args {
 	usbd_interface_handle iface;
 	const struct ucom_methods *methods;
 	void *arg;
-
-	/* used for peripheral-side USB serial. valid only when device==NULL */
-	struct usbf_device *pdevice;
-	struct usbf_interface *piface;
 };
 
 int ucomprint(void *, const char *);

@@ -381,9 +381,14 @@ pxaudc0 at obio?
 #options	CDCEF_DEBUG
 
 usbp*		at pxaudc?		# USB logical device
-cdcef*		at usbp?		# CDC ethernet function
+options 	USB_DEBUG
 options  	USBP_DEBUG
-options 	CDCEF_DEBUG
+#cdcef*		at usbp?		# CDC ethernet function
+#options 	CDCEF_DEBUG
+
+upftdi*		at usbp?		# FTDI emulation on peripheral-side of USB
+ucom*		at upftdi?
+options 	UCOM_DEBUG
 
 # Pseudo-Devices
 
