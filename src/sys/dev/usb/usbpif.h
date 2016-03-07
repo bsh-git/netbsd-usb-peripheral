@@ -81,8 +81,4 @@ struct usbp_interface_spec {
 	struct usbp_endpoint_request endpoints[];
 };
 
-
-enum USBP_INTERFACE_STATE {
-	USBP_INTERFACE_CONFIGURED,
-	USBP_INTERFACE_UNCONFIGURED };
 #endif	/* _USBPIF_H */

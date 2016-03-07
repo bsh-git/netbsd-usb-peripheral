@@ -622,14 +622,14 @@ is_vbus_on(struct usbp_bus *bus)
 static usbd_status
 activate_interface(struct usbp_interface *iface)
 {
-	iface->methods->state_change(iface, USBP_INTERFACE_CONFIGURED);
+	iface->methods->configured(iface);
 	return USBD_NORMAL_COMPLETION;
 }
 
 static usbd_status
 deactivate_interface(struct usbp_interface *iface)
 {
-	iface->methods->state_change(iface, USBP_INTERFACE_UNCONFIGURED);
+	iface->methods->unconfigured(iface);
 	return USBD_NORMAL_COMPLETION;
 }
 

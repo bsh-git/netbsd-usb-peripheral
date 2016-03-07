@@ -114,7 +114,8 @@ struct mbuf *	cdcef_newbuf(void);
 void		cdcef_start_timeout (void *);
 
 static int cdcef_init(struct ifnet *);
-static usbd_status cdcef_state_change(struct usbp_interface *, enum USBP_INTERFACE_STATE);
+static usbd_status cdcef_on_configured(struct usbp_interface *);
+static usbd_status cdcef_on_unconfigured(struct usbp_interface *);
 static usbd_status cdcef_fixup_idesc(struct usbp_interface *, usb_interface_descriptor_t *);
 
 
@@ -127,7 +128,8 @@ struct usbp_function_methods cdcef_methods = {
 };
 
 static const struct usbp_interface_methods cdcef_if_methods = {
-	cdcef_state_change,
+	cdcef_on_configured,
+	cdcef_on_unconfigured,
 	NULL,
 	cdcef_fixup_idesc
 };
@@ -243,7 +245,7 @@ error_out:
 }
 
 static usbd_status
-activate_cdcef(struct usbp_interface *iface)
+cdcef_on_configured(struct usbp_interface *iface)
 {
 	u_int16_t macaddr_hi;
 	int s;
@@ -321,28 +323,10 @@ activate_cdcef(struct usbp_interface *iface)
 }
 
 static usbd_status
-deactivate_cdcef(struct usbp_interface *iface)
+cdcef_on_unconfigured(struct usbp_interface *iface)
 {
 	DPRINTF(5, ("%s\n", __func__));
 	return USBD_NORMAL_COMPLETION;
-}
-
-static usbd_status
-cdcef_state_change(struct usbp_interface *iface, enum USBP_INTERFACE_STATE new_state)
-{
-	//struct upftdi_interface *iface = (struct upftdi_interface *)_iface;
-	DPRINTF(10, ("%s\n", __func__));
-	
-	switch (new_state) {
-	case USBP_INTERFACE_CONFIGURED:
-		return activate_cdcef(iface);
-	case USBP_INTERFACE_UNCONFIGURED:
-		return deactivate_cdcef(iface);
-	default:
-		;/**/
-	}
-
-	return USBD_STALLED;
 }
 
 usbd_status
