@@ -1,7 +1,7 @@
 /*	$NetBSD: g42xxeb_mci.c,v 1.3 2012/01/21 19:44:28 nonaka Exp $ */
 
 /*-
- * Copyright (c) 2015 Genetec Corporation.  All rights reserved.
+ * Copyright (c) 2015, 2016 Genetec Corporation.  All rights reserved.
  * Written by Hiroyuki Bessho for Genetec Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -64,6 +64,9 @@ struct g42xxeb_udc_softc {
 	void *sc_detect_ih;
 };
 
+#define	DEVNAME(sc)	device_xname(sc->sc_udc.sc_dev)
+
+
 static int pxaudc_match(device_t, cfdata_t, void *);
 static void pxaudc_attach(device_t, device_t, void *);
 
@@ -71,7 +74,9 @@ CFATTACH_DECL_NEW(pxaudc_obio, sizeof(struct g42xxeb_udc_softc),
     pxaudc_match, pxaudc_attach, NULL, NULL);
 
 static int g42xxeb_udc_intr(void *arg);
-static int g42xxeb_udc_is_connected(struct g42xxeb_udc_softc *sc);
+static void g42xxeb_udc_pullup_control(struct usbp_bus *, bool);
+//static usbd_status g42xxeb_enable(struct usbp_bus *, bool);
+static bool g42xxeb_udc_is_connected(struct usbp_bus *);
 
 static int
 pxaudc_match(device_t parent, cfdata_t cf, void *aux)
@@ -84,14 +89,16 @@ pxaudc_match(device_t parent, cfdata_t cf, void *aux)
 
 struct pxa2x0_gpioconf g42xxeb_pxaudc_gpioconf[] = {
 	{  21, GPIO_SET | GPIO_OUT },	/* USB_CONTROL */
-#if 0
-	{  6, GPIO_CLR | GPIO_ALT_FN_1_OUT },	/* MMCCLK */
-	{  8, GPIO_CLR | GPIO_ALT_FN_1_OUT },	/* MMCCS0 */
-	{  9, GPIO_CLR | GPIO_ALT_FN_1_OUT },	/* MMCCS1 */
-#endif
 	{  -1 }
 };
 
+
+static const struct usbp_bus_methods g42xxeb_bus_methods = {
+	NULL,	/* provided by UDC driver */
+	NULL,
+	g42xxeb_udc_pullup_control,
+	g42xxeb_udc_is_connected
+};
 
 static void
 pxaudc_attach(device_t parent, device_t self, void *aux)
@@ -122,7 +129,7 @@ pxaudc_attach(device_t parent, device_t self, void *aux)
 	paa.pxa_size = PXA250_USBDC_SIZE;
 	paa.pxa_intr = 0;
 				   
-	if (pxaudc_attach_sub(self, &paa)) {
+	if (pxaudc_attach_sub(self, &paa, &g42xxeb_bus_methods)) {
 		aprint_error_dev(self,
 		    "unable to attach UDC\n");
 		return;
@@ -154,11 +161,22 @@ free_intr:
 #endif
 }
 
+static bool
+is_connected(struct g42xxeb_udc_softc *sc)
+{
+	uint16_t reg;
+
+	reg = bus_space_read_2(sc->sc_obio_iot, sc->sc_obio_ioh,
+	    G42XXEB_INTSTS2);
+
+	return !(reg & (1<<G42XXEB_INT_USB));
+}
+
 static int
 g42xxeb_udc_intr(void *arg)
 {
 	struct g42xxeb_udc_softc *sc = (struct g42xxeb_udc_softc *)arg;
-	int connected = g42xxeb_udc_is_connected(sc);
+	int connected = is_connected(sc);
 
 	printf("%s: %s\n", device_xname(sc->sc_udc.sc_dev),
 	    connected ? "connected" : "not connected");
@@ -169,14 +187,16 @@ g42xxeb_udc_intr(void *arg)
 /*
  * Return non-zero if the card is currently inserted.
  */
-static int
-g42xxeb_udc_is_connected(struct g42xxeb_udc_softc *sc)
+static bool
+g42xxeb_udc_is_connected(struct usbp_bus *bus)
 {
-	uint16_t reg;
-
-	reg = bus_space_read_2(sc->sc_obio_iot, sc->sc_obio_ioh,
-	    G42XXEB_INTSTS2);
-
-	return !(reg & (1<<G42XXEB_INT_USB));
+	return is_connected(bus->usbd.hci_private);
 }
 
+static void
+g42xxeb_udc_pullup_control(struct usbp_bus *bus, bool on)
+{
+	struct g42xxeb_udc_softc *sc =  bus->usbd.hci_private;
+
+	printf("%s: %s: %s\n", DEVNAME(sc), __func__, on ? "ON" : "off");
+}

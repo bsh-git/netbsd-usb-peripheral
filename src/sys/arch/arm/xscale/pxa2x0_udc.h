@@ -95,6 +95,8 @@ struct pxaudc_softc {
 
 	callout_t	sc_callout;
 	kmutex_t	sc_lock;
+
+	struct usbp_bus_methods usbp_bus_methods;
 };
 
 #if 0
@@ -105,4 +107,4 @@ int		 pxaudc_activate(struct pxaudc_softc *, int);
 #endif
 
 /* for other attachment than to pxaip */
-int pxaudc_attach_sub(device_t, struct pxaip_attach_args *);
+int pxaudc_attach_sub(device_t, struct pxaip_attach_args *, const struct usbp_bus_methods *);

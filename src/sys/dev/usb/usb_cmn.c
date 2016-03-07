@@ -126,11 +126,13 @@ usbd_setup_pipe_flags(usbd_device_handle dev, usbd_interface_handle iface,
 	usbd_pipe_handle p;
 	usbd_status err;
 
+	DPRINTFN(1,("usbd_setup_pipe: dev=%p iface=%p ep=%p\n",
+		    dev, iface, ep));
 	p = malloc(dev->bus->pipe_size, M_USB, M_NOWAIT);
-	DPRINTFN(1,("usbd_setup_pipe: dev=%p iface=%p ep=%p pipe=%p\n",
-		    dev, iface, ep, p));
 	if (p == NULL)
 		return (USBD_NOMEM);
+	DPRINTFN(1,("usbd_setup_pipe: pipe=%p\n", p));
+
 	p->device = dev;
 	p->iface = iface;
 	p->endpoint = ep;

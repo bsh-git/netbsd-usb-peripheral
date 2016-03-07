@@ -2,7 +2,7 @@
 /*	$OpenBSD: usbf.c,v 1.16 2013/11/18 20:21:51 deraadt Exp $	*/
 
 /*-
- * Copyright (c) 2015 Genetec Corporation.  All rights reserved.
+ * Copyright (c) 2015, 2016 Genetec Corporation.  All rights reserved.
  * Written by Hiroyuki Bessho for Genetec Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,6 +29,7 @@
  * SUCH DAMAGE.
  */
 
+/* Partly derived from OpenBSD's usbf.c */
 /*
  * Copyright (c) 2006 Uwe Stuehler <uwe@openbsd.org>
  *
@@ -59,6 +60,7 @@ __KERNEL_RCSID(0, "$NetBSD$");
 #include <sys/malloc.h>
 #include <sys/kmem.h>
 #include <sys/proc.h>
+#include <sys/bitops.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -67,62 +69,112 @@ __KERNEL_RCSID(0, "$NetBSD$");
 
 #include <dev/usb/usbp.h>
 
+#ifndef	USBP_DEFAULT_VENDOR_ID
+#define	USBP_DEFAULT_VENDOR_ID 0x0001		/* XXX */
+#endif
+#ifndef	USBP_DEFAULT_PRODUCT_ID
+#define	USBP_DEFAULT_PRODUCT_ID	0x0001
+#endif
+#ifndef	USBP_DEFAULT_DEVICE_BCD
+#define	USBP_DEFAULT_DEVICE_BCD	0x0100
+#endif
+#ifndef	USBP_DEFAULT_MANUFACTURER
+#define	USBP_DEFAULT_MANUFACTURER	"NetBSD.org"
+#endif
+#ifndef	USBP_DEFAULT_PRODUCT_NAME
+#define	USBP_DEFAULT_PRODUCT_NAME	"Some USB device"
+#endif
+#ifndef	USBP_DEFAULT_SERIAL
+#define	USBP_DEFAULT_SERIAL	"1.00"
+#endif
+
 struct usbp_port {
 	struct usbd_port usbd;
 };
 
-struct usbp_interface {
-	struct usbd_interface usbd;
-
-	struct usbp_config *config;
-	SIMPLEQ_ENTRY(usbp_interface) next;
-//	SIMPLEQ_HEAD(, usbp_endpoint) endpoint_head;
-};
-
+#if 0
 struct usbp_config {
 	struct usbp_device *uc_device;
 	usb_config_descriptor_t *uc_cdesc;
 	size_t uc_cdesc_size;
 	int uc_closed;
-	SIMPLEQ_HEAD(, usbp_interface) iface_head;
 	SIMPLEQ_ENTRY(usbp_config) next;
 };
+#endif
+
+#define USBP_EMPTY_STRING_ID		(USB_LANGUAGE_TABLE+1)
+#define USBP_STRING_ID_MIN		(USB_LANGUAGE_TABLE+2)
+#define USBP_STRING_ID_MAX		255
 
 struct usbp_device {
 	struct usbd_device usbd;
 
-	uByte	 string_id;	/* next string id */
-	SIMPLEQ_HEAD(, usbp_config) configs;
+	device_t	usbp;	/* USBP logical device */
+
+//	SIMPLEQ_HEAD(, usbp_config) configs;
+	usb_config_descriptor_t *cdesc;
+	size_t	cdesc_size;
 	usb_status_t		 status;	/* device status */
+	uByte current_config;
 
 	struct usbd_xfer	*default_xfer;	/* device request xfer */
 	struct usbd_xfer	*data_xfer;	/* request response xfer */
 
 	usb_device_request_t	 def_req;	/* device request buffer */
 
-	struct usbp_config *config;
-	struct usbp_function *function;
+//	struct usbp_config *config;
+	struct usbp_function *function;	// XXX remove this
 
+	enum USBP_DEVICE_STATE {
+		USBP_DEV_INIT,
+		USBP_DEV_ASSEMBLED,	/* has interfaces, not connected to a host */
+		USBP_DEV_CONNECTED,
+		USBP_DEV_ADDRESS,	/* after set address */
+		USBP_DEV_CONFIGURED
+	} dev_state;
+
+	bool connect_auto;	/* you may fire when ready */
+
+	int	n_interfaces;
+	SIMPLEQ_HEAD(, usbp_interface)  interface_list;
+
+	int n_picked_interfaces;
+	struct usbp_interface **picked_interfaces;
+
+	/* strings in configuration */
+	SIMPLEQ_HEAD(, usbp_string) string_list;
+	__BITMAP_TYPE(usbp_string_id_map, uint32_t, USBP_STRING_ID_MAX+1) string_id_map;
+	struct usbp_string *empty_string;
 	usb_string_descriptor_t *sdesc;		/* string descriptors */
 	size_t			 sdesc_size;	/* size of ud_sdesc */
-	
+	/* scratch area to send string descriptor back to the host */
+	usb_string_descriptor_t	string_descriptor;
 };
 
 
-#define USBP_EMPTY_STRING_ID		(USB_LANGUAGE_TABLE+1)
-#define USBP_STRING_ID_MIN		(USB_LANGUAGE_TABLE+2)
-#define USBP_STRING_ID_MAX		255
+struct usbp_string {
+	SIMPLEQ_ENTRY (usbp_string) next;
+	const char *str;
+	int refcount;
+	uByte id;
 
+};
+
+struct usbp_string *usbp_intern_string(struct usbp_device *, const char *);
+void usbp_release_string(struct usbp_device *, struct usbp_string *);
+#define	usbp_string_id(s)	((s)==NULL ? 0 : (s)->id)
 
 struct usbp_softc {
 	device_t sc_dev;
 	struct usbp_bus  *sc_bus;
+	struct usbp_device *sc_usbdev;
 #if 0
 	lwp_t sc_thread;	/* task thread */
 	TAILQ_HEAD(,usbp_task)	 sc_tskq;	/* task queue head */
 #endif
 	bool sc_dying;
 	u_int8_t		*sc_hs_config;
+
 };
 
 static const char *usbrev_str[] = USBREV_STR;
@@ -140,9 +192,10 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 		, int depth, int port, struct usbp_port *up
 #endif
 	);
+#if 0
 static usbd_status usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
 				   struct usbd_endpoint *ep, int ival, struct usbd_pipe **pipe);
-
+#endif
 static void usbp_setup_default_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
     void *priv, usb_device_request_t *req, u_int16_t flags,
 				    u_int32_t timeout, usbd_callback callback);
@@ -150,15 +203,17 @@ static void usbp_do_request(struct usbd_xfer *xfer, void *priv, usbd_status err)
 static usbd_status usbp_transfer(struct usbd_xfer *xfer);
 static usbd_status usbp_probe_and_attach(struct device *parent, struct usbp_device *dev/*, int port*/);
 static void usbp_remove_device(struct usbp_device *dev/*, struct usbp_port *up*/);
-static void usbp_free_xfer(struct usbd_xfer *xfer);
+//static void usbp_free_xfer(struct usbd_xfer *xfer);
 static void usbp_close_pipe(struct usbd_pipe *pipe);
 static void usbp_set_address(struct usbp_device *dev, u_int8_t address);
 static int usbp_match(device_t, cfdata_t, void *);
 static void usbp_attach(device_t, device_t, void *);
 static usbd_status usbp_set_config(struct usbp_device *dev, u_int8_t new);
+static void assemble_attached_interfaces(device_t);
+static usbd_status reassemble_interfaces(struct usbp_device *);
+static const usb_string_descriptor_t *get_string_descriptor(struct usbp_device *, int);
 
 usb_config_descriptor_t *usbp_config_descriptor(struct usbp_device *dev, u_int8_t index);
-
 
 
 extern struct cfdriver usbf_cd;
@@ -228,7 +283,7 @@ usbp_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 
-	/* Attach the function driver. */
+	/* initialize USB device. there is only one device per client controller. */
 	err = usbp_new_device(self, sc->sc_bus, speed/*, 0, 0, &sc->sc_port*/);
 	if (err) {
 		printf("%s: usbp_new_device failed, %s\n", DEVNAME(sc),
@@ -237,6 +292,7 @@ usbp_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 
+	config_defer(self, assemble_attached_interfaces);
 #if 0
 	/* Create a process context for asynchronous tasks. */
 	if (kthread_create(PRI_NONE, 0, NULL, usbf_task_thread, sc,
@@ -248,7 +304,420 @@ usbp_attach(device_t parent, device_t self, void *aux)
 }
 
 
+static void
+assemble_attached_interfaces(device_t self)
+{
+	struct usbp_softc *sc = device_private(self);
+	struct usbp_device *dev = sc->sc_usbdev;
 
+	DPRINTF(0, ("%s: configure interfaces\n", __func__));
+	reassemble_interfaces(dev);
+
+}
+
+
+struct iface_assembly {
+	struct usbp_interface *iface;
+	int n_endpoints;
+	struct usbp_endpoint_request epspec[USB_MAX_ENDPOINTS];
+};
+
+/*
+ * select interfaces that can be configured in the device according to
+ * endpoints restrictions.
+ */
+static int
+select_interfaces(struct usbp_device *device, struct iface_assembly *ifa)
+{
+	struct usbp_interface *iface;
+	u_int epmap = 0, tmpmap;
+	int n_if = 0;
+	enum USBP_PIPE0_USAGE pipe0 = USBP_PIPE0_NOTUSED;
+	struct usbp_bus *bus = (struct usbp_bus *)(device->usbd.bus);
+	
+	SIMPLEQ_FOREACH(iface, &device->interface_list, next) {
+		const struct usbp_interface_spec *ispec = iface->ispec;
+		int i;
+		
+		switch (pipe0) {
+		case USBP_PIPE0_NOTUSED:
+			pipe0 = ispec->pipe0_usage;
+			break;
+		case USBP_PIPE0_SHARED:
+			if (ispec->pipe0_usage == USBP_PIPE0_EXCLUSIVE)
+				goto not_used;
+			break;
+		case USBP_PIPE0_EXCLUSIVE:
+			if (ispec->pipe0_usage != USBP_PIPE0_NOTUSED)
+				goto not_used;
+			break;
+		}
+			
+		tmpmap = epmap;
+		for (i=0; i < ispec->num_endpoints; ++i) {
+			struct usbp_endpoint_request *ep = &ifa[n_if].epspec[i];
+			usbd_status st;
+			*ep = ispec->endpoints[i];
+			st = bus->usbp_methods->select_endpoint(bus, ep, tmpmap);
+			DPRINTF(0, ("client controller returned %d\n", st));
+			if (st != USBD_NORMAL_COMPLETION) {
+				/* can't assing an endpoint.  This
+				 * interface is not configured in the
+				 * device */
+				goto not_used;
+			}
+			tmpmap |= (1<<UE_GET_ADDR(ep->address));
+		}
+		epmap = tmpmap;
+		ifa[n_if].n_endpoints = ispec->num_endpoints;
+		ifa[n_if].iface = iface;
+		n_if++;
+		continue;
+	not_used: ;
+	}
+
+	return n_if;
+}
+
+static bool
+compare_interfaces(struct iface_assembly *newifs, int n_new,
+    struct usbp_interface *curifs[], int n_cur)
+{
+	int i;
+	
+	if (n_new != n_cur)
+		return false;
+
+	for (i=0; i < n_cur; ++i) {
+		if (newifs[i].iface != curifs[i])
+			return false;
+	}
+
+	return true;
+}
+
+#if 0
+/*
+ * Should be called by the function driver in its attach routine to change
+ * the default device identification according to the particular function.
+ */
+void
+usbp_devinfo_setup(struct usbp_device *dev, u_int8_t devclass,
+    u_int8_t subclass, u_int8_t proto, u_int16_t vendor, u_int16_t product,
+    u_int16_t device, const char *manf, const char *prod, const char *ser)
+{
+	usb_device_descriptor_t *dd;
+
+	dd = usbp_device_descriptor(dev);
+	dd->bDeviceClass = devclass;
+	dd->bDeviceSubClass = subclass;
+	dd->bDeviceProtocol = proto;
+	if (vendor != 0)
+		USETW(dd->idVendor, vendor);
+	if (product != 0)
+		USETW(dd->idProduct, product);
+	if (device != 0)
+		USETW(dd->bcdDevice, device);
+	if (manf != NULL)
+		dd->iManufacturer = usbp_add_string(dev, manf);
+	if (prod != NULL)
+		dd->iProduct = usbp_add_string(dev, prod);
+	if (ser != NULL)
+		dd->iSerialNumber = usbp_add_string(dev, ser);
+}
+#endif
+
+
+static void
+build_device_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, int n_if)
+{
+	usb_device_descriptor_t *dd = &usbdev->usbd.ddesc;
+	uint16_t vendor, product, bcddev;
+	struct usbp_interface *iface;
+	struct usbp_bus *bus = (struct usbp_bus *)usbdev->usbd.bus;
+	int i;
+
+	/*
+	 * Initialize device descriptor.  The function driver for this
+	 * device (attached below) must complete the device descriptor.
+	 */
+	dd->bLength = USB_DEVICE_DESCRIPTOR_SIZE;
+	dd->bDescriptorType = UDESC_DEVICE;
+	dd->bMaxPacketSize = bus->ep0_maxp;
+	dd->bNumConfigurations = 1;
+	if (bus->usbd.usbrev >= USBREV_2_0)
+		USETW(dd->bcdUSB, 0x0200);
+	else
+		USETW(dd->bcdUSB, 0x0101);
+
+	for (i=0; i < n_if; ++i) {
+		if (ifa[i].iface->devinfo.class_id_valid)
+			break;
+	}
+	if (i >= n_if) {
+		dd->bDeviceClass = UDCLASS_IN_INTERFACE;
+		dd->bDeviceSubClass = 0;
+		dd->bDeviceProtocol = 0;
+	}
+	else {
+		dd->bDeviceClass = ifa[i].iface->devinfo.class_id;
+		dd->bDeviceSubClass = ifa[i].iface->devinfo.subclass_id;
+		dd->bDeviceProtocol = ifa[i].iface->devinfo.protocol;
+	}
+		
+	for (i=0; i < n_if; ++i) {
+		if (ifa[i].iface->devinfo.vendor_id_valid)
+			break;
+	}
+	if (i >= n_if) {
+		struct usbp_string *s;
+		
+		vendor = USBP_DEFAULT_VENDOR_ID;
+		product = USBP_DEFAULT_PRODUCT_ID;
+		bcddev = USBP_DEFAULT_DEVICE_BCD;
+
+		s = usbp_intern_string(usbdev, USBP_DEFAULT_MANUFACTURER);
+		dd->iManufacturer = usbp_string_id(s);
+		s = usbp_intern_string(usbdev, USBP_DEFAULT_PRODUCT_NAME);
+		dd->iProduct = usbp_string_id(s);
+		s = usbp_intern_string(usbdev, USBP_DEFAULT_SERIAL);
+		dd->iSerialNumber = usbp_string_id(s);
+		
+	}
+	else {
+		iface = ifa[i].iface;
+		
+		vendor = iface->devinfo.vendor_id;
+		product = iface->devinfo.product_id;
+		bcddev = iface->devinfo.bcd_device;
+
+		dd->iManufacturer = usbp_string_id(iface->string[USBP_IF_STR_MANUFACTURER]);
+		dd->iProduct = usbp_string_id(iface->string[USBP_IF_STR_PRODUCT_NAME]);
+		dd->iSerialNumber = usbp_string_id(iface->string[USBP_IF_STR_SERIAL]);
+	}
+	USETW(dd->idVendor, vendor);
+	USETW(dd->idProduct, product);
+	USETW(dd->bcdDevice, bcddev);
+
+}
+
+/*
+ * build configuration descriptor which consists of interface
+ * descriptors and endpoint descriptors.
+ */
+static usbd_status
+build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, int n_if)
+{
+	size_t total_size;
+	uint8_t *area, *ap;
+	usb_config_descriptor_t *cd;
+	int i, j;
+
+	if (usbdev->cdesc) {
+		kmem_free(usbdev->cdesc, usbdev->cdesc_size);
+		usbdev->cdesc = NULL;
+	}
+
+	/* calculate the size of config descriptor. */
+	total_size = USB_CONFIG_DESCRIPTOR_SIZE;
+	total_size += USB_INTERFACE_DESCRIPTOR_SIZE * n_if;
+	for (i=0; i < n_if; ++i) {
+		total_size += ifa[i].iface->additional_idesc_size;
+		total_size += USB_ENDPOINT_DESCRIPTOR_SIZE *
+		    ifa[i].iface->ispec->num_endpoints;
+	}
+
+	DPRINTF(0, ("%s: config_descriptor_size=%zd\n", __func__, total_size));
+
+	area = kmem_alloc(total_size, KM_SLEEP);
+	if (area == NULL)
+		return USBD_NOMEM;
+	usbdev->cdesc = cd = (usb_config_descriptor_t *)area;
+	cd->bLength = USB_CONFIG_DESCRIPTOR_SIZE;
+	cd->bDescriptorType = UDESC_CONFIG;
+	
+	USETW(cd->wTotalLength, total_size);
+	cd->bNumInterface = n_if;
+	cd->bConfigurationValue = 1;
+	cd->iConfiguration = 0;
+	cd->bmAttributes = UC_BUS_POWERED | UC_SELF_POWERED;
+#if 0
+	cd->bMaxPower = 100 / UC_POWER_FACTOR; /* 100 mA */
+#else
+	cd->bMaxPower = 0; /* XXX 0 mA */
+#endif
+	ap = area + USB_CONFIG_DESCRIPTOR_SIZE;
+	for (i=0; i < n_if; ++i) {
+		usb_interface_descriptor_t *id =
+		    (usb_interface_descriptor_t *)ap;
+		struct usbp_interface *iface = ifa[i].iface;
+
+		id->bLength = USB_INTERFACE_DESCRIPTOR_SIZE;
+		id->bDescriptorType = UDESC_INTERFACE;
+		id->bInterfaceNumber = i + 1;
+		id->bAlternateSetting = 0;
+		id->bInterfaceClass = iface->ispec->class_id;
+		id->bInterfaceSubClass = iface->ispec->subclass_id;
+		id->bInterfaceProtocol = iface->ispec->protocol;
+		id->iInterface = usbp_string_id(iface->string[USBP_IF_STR_DESCRIPTION]);
+		id->bNumEndpoints = iface->ispec->num_endpoints;
+
+		ap += USB_INTERFACE_DESCRIPTOR_SIZE;
+
+		if (iface->usbd.endpoints != NULL) {
+			/* XXX */
+		}
+		iface->usbd.endpoints = kmem_alloc(sizeof (struct usbd_endpoint) *
+		    iface->ispec->num_endpoints,
+		    KM_NOSLEEP);
+		if (iface->usbd.endpoints == NULL)
+			return USBD_NOMEM;
+
+		for (j=0; j < iface->ispec->num_endpoints; ++j) {
+			usb_endpoint_descriptor_t *ed =
+			    (usb_endpoint_descriptor_t *)ap;
+			struct usbd_endpoint *ep = &iface->usbd.endpoints[j];
+
+			ed->bLength = USB_ENDPOINT_DESCRIPTOR_SIZE;
+			ed->bDescriptorType = UDESC_ENDPOINT;
+
+			ed->bEndpointAddress = ifa[i].epspec[j].address;
+			ed->bmAttributes = ifa[i].epspec[j].attributes;
+			USETW(ed->wMaxPacketSize, ifa[i].epspec[j].packetsize);
+
+			ep->edesc = ed;
+			ep->refcnt = 1;
+			ep->datatoggle = 0;
+			
+			printf("%s: interface=%p endpoitns=%p endpoint[%d]=0x%x (%p)\n",
+			    __func__,
+			    iface, iface->usbd.endpoints,
+			    j, ep->edesc->bEndpointAddress, ed);
+			ap += USB_ENDPOINT_DESCRIPTOR_SIZE;
+		}
+
+		if (iface->additional_idesc_size > 0) {
+			memcpy(ap, iface->additional_idesc, iface->additional_idesc_size);
+			ap += iface->additional_idesc_size;
+		}
+
+		if (iface->methods->fixup_idesc)
+			iface->methods->fixup_idesc(iface, id);
+	}
+
+	return USBD_NORMAL_COMPLETION;
+}
+
+static inline bool
+is_vbus_on(struct usbp_bus *bus)
+{
+	if (bus->usbp_methods->is_connected == NULL) {
+		/* platform provides the method. assume we are
+		 * connected to the host. */
+		return true;
+	}
+	return bus->usbp_methods->is_connected(bus);
+}
+
+static usbd_status
+activate_interface(struct usbp_interface *iface)
+{
+	iface->methods->state_change(iface, USBP_INTERFACE_CONFIGURED);
+	return USBD_NORMAL_COMPLETION;
+}
+
+static usbd_status
+deactivate_interface(struct usbp_interface *iface)
+{
+	iface->methods->state_change(iface, USBP_INTERFACE_UNCONFIGURED);
+	return USBD_NORMAL_COMPLETION;
+}
+
+static usbd_status
+reassemble_interfaces(struct usbp_device *device)
+{
+	struct iface_assembly *ifa = alloca(sizeof (struct iface_assembly) *
+	    device->n_interfaces);
+	int n_new;
+	enum USBP_DEVICE_STATE old_state = device->dev_state;
+	struct usbp_bus *bus = (struct usbp_bus *)device->usbd.bus;
+
+	n_new = select_interfaces(device, ifa);
+
+	DPRINTF(5, ("%s: %d interface(s)\n", __func__, n_new));
+	do {
+		int i, j;
+		for (i=0; i < n_new; ++i) {
+			printf("if=%p, %d endpoints: ", ifa[i].iface, ifa[i].n_endpoints);
+			for(j=0; j < ifa[i].n_endpoints; ++j) {
+				printf("0x%x ", ifa[i].epspec[j].address);
+			}
+			printf("\n");
+		}
+	} while (0);
+	
+	if (!compare_interfaces(ifa, n_new, device->picked_interfaces,
+		device->n_picked_interfaces)) {
+		if (device->dev_state == USBP_DEV_CONNECTED) {
+			if (bus->usbp_methods->pullup_control)
+				bus->usbp_methods->pullup_control(bus, false);
+			
+			bus->usbp_methods->enable(bus, false);
+		}
+
+		if (device->dev_state != USBP_DEV_INIT &&
+		    device->n_picked_interfaces > 0) {
+			int i;
+			// unconfigure
+			for (i=0; i < device->n_picked_interfaces; ++i) {
+				deactivate_interface(device->picked_interfaces[i]);
+			}
+
+			kmem_free(device->picked_interfaces,
+			    sizeof (struct usbp_interface) * device->n_picked_interfaces);
+			device->picked_interfaces = NULL;
+			device->n_picked_interfaces = 0;
+		}
+
+		if (n_new > 0) {
+			int i;
+
+			build_device_descriptor(device, ifa, n_new);
+			build_config_descriptor(device, ifa, n_new);
+			// configure
+
+			device->picked_interfaces =
+			    kmem_alloc(n_new * sizeof (struct usbp_interface), KM_NOSLEEP);
+
+			if (device->picked_interfaces == NULL)
+				return USBD_NOMEM;
+
+			for (i=0; i < n_new; ++i) {
+				struct usbp_interface *iface = ifa[i].iface;
+				activate_interface(iface);
+				device->picked_interfaces[i] = iface;
+			}
+
+			device->n_picked_interfaces = n_new;
+			device->dev_state = USBP_DEV_ASSEMBLED;
+
+		}
+	}
+
+	if (device->dev_state == USBP_DEV_ASSEMBLED &&
+	    (old_state >= USBP_DEV_CONNECTED ||
+		(is_vbus_on(bus) && device->connect_auto))) {
+		
+		if (bus->usbp_methods->enable)
+			bus->usbp_methods->enable(bus, true);
+		if (bus->usbp_methods->pullup_control)
+			bus->usbp_methods->pullup_control(bus, true);
+			
+		device->dev_state = USBP_DEV_CONNECTED;
+	}
+
+	return USBD_NORMAL_COMPLETION;
+}
 
 /*
  * Software interrupts
@@ -307,17 +776,13 @@ usbp_host_reset(struct usbp_bus *bus)
  *  USB device
  */
 static usbd_status
-usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
-#if 0
-		, int depth,
-		int port, struct usbp_port *up
-#endif
-	)
+usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 {
 	struct usbp_device *dev = NULL;
-	usb_device_descriptor_t *ud;
 	usbd_status err;
 	struct usbd_pipe *default_pipe = NULL;
+	struct usbp_softc *sc = device_private(parent);
+	int i;
 
 #if 0
 #ifdef DIAGNOSTIC
@@ -332,24 +797,32 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 		return USBD_NOMEM;
 
 	dev->usbd.bus = &bus->usbd;                   // XXX
-	dev->string_id = USBP_STRING_ID_MIN;
-	SIMPLEQ_INIT(&dev->configs);
+	dev->usbp = parent;
+//	SIMPLEQ_INIT(&dev->configs);
+	dev->current_config = USB_UNCONFIG_NO;
+	SIMPLEQ_INIT(&dev->interface_list);
+#if 0
+	/* these are zero-ed by malloc */
+	dev->n_interfaces = 0;
+	dev->picked_interfaces = NULL;
+	dev->n_picked_interfaces = 0;
+	dev->cdesc = NULL;
+	dev->cdesc_size = 0;
+#endif	
+
+	dev->dev_state = USBP_DEV_INIT;
+	dev->connect_auto = true;          // XXX
+
+	/* initialize string pool */
+	/* __BITMAP_ZERO(...) */
+	for (i=0; i < USBP_EMPTY_STRING_ID; ++i)
+		__BITMAP_SET(i, &dev->string_id_map);
+	dev->empty_string = usbp_intern_string(dev, "");
+	DPRINTF(5, ("%s: dev=%p empty_string=%p\n", __func__, dev, dev->empty_string));
 
 	/* Initialize device status. */
 	USETW(dev->status.wStatus, UDS_SELF_POWERED);
 
-	/*
-	 * Initialize device descriptor.  The function driver for this
-	 * device (attached below) must complete the device descriptor.
-	 */
-	ud = &dev->usbd.ddesc;
-	ud->bLength = USB_DEVICE_DESCRIPTOR_SIZE;
-	ud->bDescriptorType = UDESC_DEVICE;
-	ud->bMaxPacketSize = bus->ep0_maxp;
-	if (bus->usbd.usbrev >= USBREV_2_0)
-		USETW(ud->bcdUSB, 0x0200);
-	else
-		USETW(ud->bcdUSB, 0x0101);
 
 	/* Set up the default endpoint handle and descriptor. */
 	dev->usbd.def_ep.edesc = &dev->usbd.def_ep_desc;
@@ -357,11 +830,12 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 	dev->usbd.def_ep_desc.bDescriptorType = UDESC_ENDPOINT;
 	dev->usbd.def_ep_desc.bEndpointAddress = USB_CONTROL_ENDPOINT;
 	dev->usbd.def_ep_desc.bmAttributes = UE_CONTROL;
-	USETW(dev->usbd.def_ep_desc.wMaxPacketSize, ud->bMaxPacketSize);
+	USETW(dev->usbd.def_ep_desc.wMaxPacketSize, bus->ep0_maxp);
 	dev->usbd.def_ep_desc.bInterval = 0;
 
 	/* Establish the default pipe. */
-	err = usbp_setup_pipe(dev, NULL, (struct usbd_endpoint *)&dev->usbd.def_ep, 0, &default_pipe);
+//	err = usbp_setup_pipe(dev, NULL, (struct usbd_endpoint *)&dev->usbd.def_ep, 0, &default_pipe);
+	err = usbd_setup_pipe(&dev->usbd, NULL, &dev->usbd.def_ep, 0, &default_pipe);
 	if (err)
 		goto bad;
 
@@ -388,8 +862,10 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 #endif
 
 	bus->device = dev;
+	sc->sc_usbdev = dev;
+	
 
-	/* Attach function driver. */
+	/* Attach interface drivers. */
 	err = usbp_probe_and_attach(parent, dev /* , port*/);
 	if (err) {
 		DPRINTF(0, ("%s: %s: usbf_probe_and_attach failed. err=%d\n",
@@ -403,9 +879,9 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 bad:
 	if (dev != NULL) {
 		if (dev->default_xfer)
-			usbp_free_xfer(dev->default_xfer);
+			usbd_free_xfer(dev->default_xfer);
 		if (dev->data_xfer)
-			usbp_free_xfer(dev->data_xfer);
+			usbd_free_xfer(dev->data_xfer);
 		if (default_pipe)
 			usbp_close_pipe(default_pipe);
 		free(dev, M_USB);
@@ -415,34 +891,33 @@ bad:
 }
 
 /*
- * Should be called by the function driver in its attach routine to change
- * the default device identification according to the particular function.
+ * index: the index number in endpoint request
  */
-void
-usbp_devinfo_setup(struct usbp_device *dev, u_int8_t devclass,
-    u_int8_t subclass, u_int8_t proto, u_int16_t vendor, u_int16_t product,
-    u_int16_t device, const char *manf, const char *prod, const char *ser)
+usbd_status
+usbp_open_pipe(struct usbp_interface *iface, int index, int flags, struct usbd_pipe **pipe)
 {
-	usb_device_descriptor_t *dd;
+	struct usbd_endpoint *ep = usbp_iface_endpoint(iface, index);
 
-	dd = usbp_device_descriptor(dev);
-	dd->bDeviceClass = devclass;
-	dd->bDeviceSubClass = subclass;
-	dd->bDeviceProtocol = proto;
-	if (vendor != 0)
-		USETW(dd->idVendor, vendor);
-	if (product != 0)
-		USETW(dd->idProduct, product);
-	if (device != 0)
-		USETW(dd->bcdDevice, device);
-	if (manf != NULL)
-		dd->iManufacturer = usbp_add_string(dev, manf);
-	if (prod != NULL)
-		dd->iProduct = usbp_add_string(dev, prod);
-	if (ser != NULL)
-		dd->iSerialNumber = usbp_add_string(dev, ser);
+	if (ep == NULL)
+		return USBD_INVAL;
+
+	return usbd_open_pipe(&iface->usbd, ep->edesc->bEndpointAddress, flags, pipe);
 }
 
+
+struct usbd_endpoint *
+usbp_iface_endpoint(struct usbp_interface *iface, int index)
+{
+	if (index < 0 || iface->ispec->num_endpoints <= index) {
+		aprint_error("%s: endpoint index out of range (%d)\n",
+		    __func__, index);
+		return NULL;
+	}
+
+	return &iface->usbd.endpoints[index];
+}
+
+#if 0
 usbd_status
 usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
     struct usbd_endpoint *ep, int ival, struct usbd_pipe **pipe)
@@ -473,6 +948,7 @@ usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
 	*pipe = p;
 	return USBD_NORMAL_COMPLETION;
 }
+#endif
 
 void
 usbp_setup_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
@@ -527,6 +1003,25 @@ usbp_set_address(struct usbp_device *dev, u_int8_t address)
 	dev->usbd.address = address;
 }
 
+#if 1
+/*
+ * Currently, only one configuration is allowed.
+ */
+static usbd_status
+usbp_set_config(struct usbp_device *dev, u_int8_t new)
+{
+	if (new != USB_UNCONFIG_NO && new != 1) {
+		return USBD_INVAL;
+	}
+
+	if (new == USB_UNCONFIG_NO) {
+		/* move to unconfigured state. */
+		// XXX
+	}
+
+	return USBD_NORMAL_COMPLETION;
+}
+#else
 /*
  * If the device was in the Addressed state (dev->config == NULL) before, it
  * will be in the Configured state upon successful return from this routine.
@@ -576,40 +1071,7 @@ usbp_set_config(struct usbp_device *dev, u_int8_t new)
 	}
 	return USBD_INVAL;
 }
-
-static usb_string_descriptor_t *
-usbp_string_descriptor(struct usbp_device *dev, u_int8_t id)
-{
-	static usb_string_descriptor_t sd0;
-	static usb_string_descriptor_t sd1;
-	usb_string_descriptor_t *sd;
-
-	/* handle the special string ids */
-	switch (id) {
-	case USB_LANGUAGE_TABLE:
-		sd0.bLength = 4;
-		sd0.bDescriptorType = UDESC_STRING;
-		USETW(sd0.bString[0], 0x0409 /* en_US */);
-		return &sd0;
-
-	case USBP_EMPTY_STRING_ID:
-		sd1.bLength = 2;
-		sd1.bDescriptorType = UDESC_STRING;
-		return &sd1;
-	}
-
-	/* check if the string id is valid */
-	if (id > dev->string_id)
-		return NULL;
-
-	/* seek and return the descriptor of a non-empty string */
-	id -= USBP_STRING_ID_MIN;
-	sd = dev->sdesc;
-	while (id-- > 0)
-		sd = (usb_string_descriptor_t *)((char *)sd + sd->bLength);
-	return sd;
-}
-
+#endif
 
 
 /*
@@ -624,10 +1086,9 @@ usbp_get_descriptor(struct usbp_device *dev, usb_device_request_t *req,
 	u_int8_t index = UGETW(req->wValue) & 0xff;
 	usb_device_descriptor_t *dd;
 	usb_config_descriptor_t *cd;
-	usb_string_descriptor_t *sd;
+	const usb_string_descriptor_t *sd;
 	struct usbp_softc *sc;
 
-	printf("%s: type=%d index=%d\n", __func__, type, index);
 	switch (type) {
 	case UDESC_DEVICE:
 		dd = &dev->usbd.ddesc;
@@ -687,13 +1148,12 @@ usbp_get_descriptor(struct usbp_device *dev, usb_device_request_t *req,
 	}
 
 	case UDESC_STRING:
-		sd = usbp_string_descriptor(dev, index);
+		sd = get_string_descriptor(dev, index);
 		if (sd == NULL)
 			return USBD_INVAL;
-		*data = sd;
+		*data = __UNCONST(sd);
 		USETW(req->wLength, MIN(UGETW(req->wLength), sd->bLength));
 		return USBD_NORMAL_COMPLETION;
-
 	default:
 		DPRINTF(0,("usbf_get_descriptor: unknown descriptor type=%u\n",
 		    type));
@@ -701,6 +1161,7 @@ usbp_get_descriptor(struct usbp_device *dev, usb_device_request_t *req,
 	}
 }
 
+#if 0
 static struct usbd_endpoint *
 usbp_iface_endpoint(struct usbp_interface *iface, u_int8_t address)
 {
@@ -717,11 +1178,13 @@ usbp_iface_endpoint(struct usbp_interface *iface, u_int8_t address)
 	}
 	return NULL;
 }
+#endif
 
 
 static struct usbd_endpoint *
-usbp_config_endpoint(struct usbp_config *cfg, u_int8_t address)
+usbp_device_endpoint(struct usbp_device *dev, u_int8_t address)
 {
+#if 0
 	struct usbp_interface *iface;
 	struct usbd_endpoint *ep;
 
@@ -730,9 +1193,9 @@ usbp_config_endpoint(struct usbp_config *cfg, u_int8_t address)
 		if (ep)
 			return ep;
 	}
+#endif
 	return NULL;
 }
-
 
 static void
 usbp_set_endpoint_halt(struct usbd_endpoint *endpoint)
@@ -753,15 +1216,15 @@ usbp_stall_pipe(struct usbd_pipe *pipe)
 
 
 static usbd_status
-usbp_set_endpoint_feature(struct usbp_config *cfg, u_int8_t address,
+usbp_set_endpoint_feature(struct usbp_device *dev, u_int8_t address,
     u_int16_t value)
 {
 	struct usbd_endpoint *ep;
 
-	DPRINTF(0,("usbf_set_endpoint_feature: cfg=%p address=%#x"
-	    " value=%#x\n", cfg, address, value));
+	DPRINTF(0,("usbf_set_endpoint_feature: dev=%p address=%#x"
+	    " value=%#x\n", dev, address, value));
 
-	ep = usbp_config_endpoint(cfg, address);
+	ep = usbp_device_endpoint(dev, address);
 	if (ep == NULL)
 		return USBD_BAD_ADDRESS;
 
@@ -776,15 +1239,15 @@ usbp_set_endpoint_feature(struct usbp_config *cfg, u_int8_t address,
 }
 
 static usbd_status
-usbp_clear_endpoint_feature(struct usbp_config *cfg, u_int8_t address,
+usbp_clear_endpoint_feature(struct usbp_device *dev, u_int8_t address,
     u_int16_t value)
 {
 	struct usbd_endpoint *ep;
 
-	DPRINTF(0,("usbf_clear_endpoint_feature: cfg=%p address=%#x"
-	    " value=%#x\n", cfg, address, value));
+	DPRINTF(0,("usbf_clear_endpoint_feature: device=%p address=%#x"
+	    " value=%#x\n", dev, address, value));
 
-	ep = usbp_config_endpoint(cfg, address);
+	ep = usbp_device_endpoint(dev, address);
 	if (ep == NULL)
 		return USBD_BAD_ADDRESS;
 
@@ -807,7 +1270,7 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 {
 	struct usbp_device *dev = (struct usbp_device*)(xfer->pipe->device);
 	usb_device_request_t *req = xfer->buffer;
-	struct usbp_config *cfg;
+	//struct usbp_config *cfg;
 	void *data = NULL;
 	u_int16_t value;
 	u_int16_t index;
@@ -847,14 +1310,8 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 		break;
 
 	case C(UR_GET_CONFIG, UT_READ_DEVICE):
-	{			/* XXX */
-		if ((cfg = dev->config) == NULL) {
-			static u_int8_t zero = 0;
-			data = &zero;
-		} else
-			data = &cfg->uc_cdesc->bConfigurationValue;
+		data = &dev->current_config;
 		USETW(req->wLength, MIN(UGETW(req->wLength), 1));
-	}
 		break;
 
 	case C(UR_GET_DESCRIPTOR, UT_READ_DEVICE):
@@ -881,19 +1338,14 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 	case C(UR_SET_FEATURE, UT_WRITE_ENDPOINT):
 		value = UGETW(req->wValue);
 		index = UGETW(req->wIndex);
-		if ((cfg = dev->config) == NULL)
-			err = USBD_STALLED;
-		else
-			err = usbp_set_endpoint_feature(cfg, index, value);
+		/* check if device is configured */
+		err = usbp_set_endpoint_feature(dev, index, value);
 		break;
 
 	case C(UR_CLEAR_FEATURE, UT_WRITE_ENDPOINT):
 		value = UGETW(req->wValue);
 		index = UGETW(req->wIndex);
-		if ((cfg = dev->config) == NULL)
-			err = USBD_STALLED;
-		else
-			err = usbp_clear_endpoint_feature(cfg, index, value);
+		err = usbp_clear_endpoint_feature(dev, index, value);
 		break;
 
 	/* Alternate settings for interfaces are unsupported. */
@@ -930,7 +1382,7 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 	}
 	}
 
-	DPRINTF(5,("usbf_do_request: %d err=%d\n", __LINE__, err));
+	DPRINTF(5,("usbf_do_request: %d err=%d wLength=%d\n", __LINE__, err, UGETW(req->wLength)));
 
 	if (err) {
 		DPRINTF(0,("usbf_do_request: request=%#x, type=%#x "
@@ -992,14 +1444,15 @@ usbp_transfer(struct usbd_xfer *xfer)
 static usbd_status
 usbp_probe_and_attach(struct device *parent, struct usbp_device *dev/*, int port*/)
 {
-	struct usbp_function_attach_args uaa;
-	device_t dv;
+	struct usbp_interface_attach_args uaa;
+	cfdata_t cfdata;
 
 	KASSERT(dev->function == NULL);
 
 	bzero(&uaa, sizeof uaa);
 	uaa.device = dev;
 
+#if 0
 	/*
 	 * The softc structure of a USB function driver must begin with a
 	 * "struct usbf_function" member (instead of USBBASEDEV), which must
@@ -1011,6 +1464,12 @@ usbp_probe_and_attach(struct device *parent, struct usbp_device *dev/*, int port
 		dev->function = (struct usbp_function *)device_private(dv);
 		return USBD_NORMAL_COMPLETION;
 	}
+#else
+	while ((cfdata = config_search_ia(NULL, parent, "usbp", &uaa)) != NULL) {
+		printf("%s: cfdata=%p\n", __func__, cfdata);
+		config_attach(parent, cfdata, &uaa, NULL);
+	}
+#endif
 
 	/*
 	 * We failed to attach a function driver for this device, but the
@@ -1033,16 +1492,6 @@ usbp_remove_device(struct usbp_device *dev/*, struct usbp_port *up*/)
 	up->device = NULL;
 #endif
 	free(dev, M_USB);
-}
-
-
-static void
-usbp_free_xfer(struct usbd_xfer *xfer)
-{
-	DPRINTF(999,("usbf_free_xfer: %p\n", xfer));
-	if (xfer->rqflags & (URQ_DEV_DMABUF | URQ_AUTO_DMABUF))
-		usbd_free_buffer(xfer);
-	xfer->device->bus->methods->freex(xfer->device->bus, xfer);
 }
 
 
@@ -1092,34 +1541,34 @@ usbp_device_descriptor(struct usbp_device *dev)
 usb_config_descriptor_t *
 usbp_config_descriptor(struct usbp_device *dev, u_int8_t index)
 {
-	struct usbp_config *uc;
+#if 1
 
+	/*
+	 * Currently, we don't support multiple configurations
+	 */
+	return dev->cdesc;
+#else
+	struct usbp_config *uc;
 	SIMPLEQ_FOREACH(uc, &dev->configs, next) {
 		if (index-- == 0)
 			return uc->uc_cdesc;
 	}
 	return NULL;
+#endif	
 }
 
 
 
+#if 0
 struct usbd_xfer *
 usbp_alloc_xfer(struct usbp_device *dev)
 {
-	struct usbd_xfer *xfer;
-
-	/* allocate zero-filled buffer */
-	xfer = dev->usbd.bus->methods->allocx(dev->usbd.bus);
-	if (xfer == NULL)
-		return NULL;
-	xfer->device = &dev->usbd;
-	callout_init(&xfer->timeout_handle, 0);
-	DPRINTF(999,("usbf_alloc_xfer() = %p\n", xfer));
-	return xfer;
+	return usbd_alloc_xfer(&dev->usbd);
 }
+#endif
 
 
-
+#if 0
 /*
  * Add a new device configuration to an existing USB logical device.
  * The new configuration initially has zero interfaces.
@@ -1166,7 +1615,6 @@ usbp_add_config(struct usbp_device *dev, struct usbp_config **ucp)
 	return USBD_NORMAL_COMPLETION;
 }
 
-
 /*
  * Allocate memory for a new descriptor at the end of the existing
  * device configuration descriptor.
@@ -1202,8 +1650,9 @@ usbp_add_config_desc(struct usbp_config *uc, usb_descriptor_t *d,
 	return USBD_NORMAL_COMPLETION;
 }
 
+
 usbd_status
-usbp_add_interface(struct usbp_config *uc, u_int8_t bInterfaceClass,
+usbpOLD_add_interface(struct usbp_config *uc, u_int8_t bInterfaceClass,
     u_int8_t bInterfaceSubClass, u_int8_t bInterfaceProtocol,
     const char *string, struct usbp_interface **uip)
 {
@@ -1251,6 +1700,7 @@ usbp_add_interface(struct usbp_config *uc, u_int8_t bInterfaceClass,
 	return USBD_NORMAL_COMPLETION;
 }
 
+#if 0
 usbd_status
 usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
     u_int8_t bmAttributes, u_int16_t wMaxPacketSize, u_int8_t bInterval,
@@ -1293,6 +1743,7 @@ usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
 	*uep = ue;
 	return USBD_NORMAL_COMPLETION;
 }
+#endif
 
 /*
  * Close the configuration, thereby combining all descriptors and creating
@@ -1352,16 +1803,7 @@ usbp_end_config(struct usbp_config *uc)
 	uc->uc_closed = 1;
 	return err;
 }
-
-
-
-
-
-
-
-
-
-
+#endif
 
 
 int
@@ -1375,36 +1817,6 @@ usbd_endpoint_address(struct usbd_endpoint *endpoint)
 {
 	return endpoint->edesc->bEndpointAddress;
 }
-
-usbd_status
-usbp_open_pipe(struct usbp_interface *iface, u_int8_t address,
-    struct usbd_pipe **pipe)
-{
-	return usbp_open_pipe_ival(iface, address, pipe, 0);
-}
-
-usbd_status
-usbp_open_pipe_ival(struct usbp_interface *iface, u_int8_t address,
-    struct usbd_pipe **pipe, int ival)
-{
-	struct usbd_endpoint *ep;
-	struct usbd_pipe *p;
-	usbd_status err;
-
-	ep = usbp_iface_endpoint(iface, address);
-	if (ep == NULL)
-		return USBD_BAD_ADDRESS;
-
-	err = usbp_setup_pipe(iface->config->uc_device, iface, ep,
-	    ival, &p);
-	if (err)
-		return err;
-	LIST_INSERT_HEAD(&iface->usbd.pipes, p, next);
-	*pipe = p;
-	return USBD_NORMAL_COMPLETION;
-}
-
-
 
 /* Called at splusb() */
 void
@@ -1503,6 +1915,7 @@ usbp_start_next(struct usbd_pipe *pipe)
 }
 
 
+#if 0
 /*
  * Add a string descriptor to a logical device and return the string's id.
  *
@@ -1544,6 +1957,7 @@ usbp_add_string(struct usbp_device *dev, const char *string)
 	id = dev->string_id++;
 	return id;
 }
+#endif
 
 
 #ifdef USBP_DEBUG
@@ -1723,4 +2137,310 @@ usbp_describe_xfer(struct usbd_xfer *xfer)
 	    xfer->length, xfer->actlen, xfer->pipe, xfer->pipe->endpoint, usbd_endpoint_address(ep));
 		 
 	return buf;
+}
+
+
+/* New APIs */
+usbd_status
+usbp_add_interface(struct usbp_device *dev,
+    struct usbp_interface *iface,
+    const struct usbp_device_info *devinfo,
+    const struct usbp_interface_spec *ispec,
+    const struct usbp_interface_methods *methods,
+    const void *additional_idesc,
+    size_t additional_idesc_size)
+{
+	size_t ispec_size = sizeof *ispec +
+	    ispec->num_endpoints * sizeof (struct usbp_endpoint_request);
+	struct usbp_interface_spec *ispec_copy;
+
+
+	DPRINTF(5, ("%s: dev=%p empty_string=%p\n", __func__, dev, dev->empty_string));
+
+	usbp_init_interface(dev, iface);
+
+	ispec_copy = kmem_alloc(ispec_size, KM_SLEEP);
+	if (ispec_copy == NULL)
+		return USBD_NOMEM;
+
+	memcpy(ispec_copy, ispec, ispec_size);
+	iface->ispec = ispec_copy;
+	iface->methods = methods;
+
+	iface->devinfo.class_id_valid = (devinfo->class_id != USBP_ID_UNSPECIFIED);
+	if (iface->devinfo.class_id_valid) {
+		iface->devinfo.class_id_valid = true;
+		iface->devinfo.class_id = devinfo->class_id;
+		iface->devinfo.subclass_id = devinfo->subclass_id;
+		iface->devinfo.protocol = devinfo->protocol;
+	}
+
+	iface->devinfo.vendor_id_valid = (devinfo->vendor_id != USBP_ID_UNSPECIFIED);
+	if (iface->devinfo.vendor_id_valid) {
+		iface->devinfo.vendor_id = devinfo->vendor_id;
+		iface->devinfo.product_id = devinfo->product_id;
+		iface->devinfo.bcd_device = devinfo->bcd_device;
+	}
+
+	iface->num_strings = 4;
+	iface->string = kmem_alloc(sizeof (struct usbp_string) * iface->num_strings, KM_SLEEP);
+	if (iface->string == NULL) {
+		kmem_free(__UNCONST(iface->ispec), ispec_size);
+		iface->ispec = NULL;
+		return USBD_NOMEM;
+	}
+	
+
+	iface->string[USBP_IF_STR_MANUFACTURER] = 
+	    usbp_intern_string(dev, devinfo->manufacturer_name);
+	iface->string[USBP_IF_STR_PRODUCT_NAME] = 
+	    usbp_intern_string(dev, devinfo->product_name);
+	iface->string[USBP_IF_STR_SERIAL] = 
+	    usbp_intern_string(dev, devinfo->serial);
+	iface->string[USBP_IF_STR_DESCRIPTION] = 
+	    usbp_intern_string(dev, ispec->description);
+
+	if (additional_idesc == NULL || additional_idesc_size == 0) {
+		iface->additional_idesc = NULL;
+		iface->additional_idesc_size = 0;
+	}
+	else {
+		iface->additional_idesc = additional_idesc;
+		iface->additional_idesc_size = additional_idesc_size;
+	}
+
+	SIMPLEQ_INSERT_HEAD(&dev->interface_list, iface, next);
+	dev->n_interfaces++;
+
+	if (!cold) {
+		// reconfigure
+	}
+		
+	
+	return USBD_NORMAL_COMPLETION;
+}
+
+usbd_status
+usbp_delete_interface(struct usbp_device *dev,
+    struct usbp_interface *iface)
+{
+
+
+	if (iface->ispec) {
+		size_t ispec_size = sizeof *iface->ispec +
+		    iface->ispec->num_endpoints * sizeof (struct usbp_endpoint_request);
+		kmem_free(__UNCONST(iface->ispec), ispec_size);
+		iface->ispec = NULL;
+	}
+		
+
+	if (iface->string) {
+		int i;
+
+		for (i=0; i < iface->num_strings; ++i) {
+			if (iface->string[i]) {
+				usbp_release_string(dev, iface->string[i]);
+			}
+		}
+
+
+		kmem_free(iface->string, sizeof (struct usbp_string) * iface->num_strings);
+		iface->string = NULL;
+	}
+
+	SIMPLEQ_REMOVE(&dev->interface_list, iface, usbp_interface, next);
+	dev->n_interfaces--;
+
+	if (dev->dev_state != USBP_DEV_INIT) {
+		// reconfigure
+	}
+		
+	return USBD_NORMAL_COMPLETION;
+}
+
+/*
+ * manage strings used in the USB device configuration.
+ */
+struct usbp_string *
+usbp_intern_string(struct usbp_device *usbdev, const char *string)
+{
+	struct usbp_string *s;
+	size_t len;
+	int id;
+	char *tmp;
+	
+	DPRINTF(5, ("%s %s\n", __func__, string));
+	
+	if (string == NULL) {
+#if 1
+		return NULL;
+#else
+		s = usbdev->empty_string;
+		DPRINTF(5, ("%s empty=%p\n", __func__, s));
+		s->refcount++;
+		return s;
+#endif
+	}
+
+	len = strlen(string);
+
+	SIMPLEQ_FOREACH(s, &usbdev->string_list, next) {
+		if (0 == strcmp(string, s->str)) {
+			s->refcount++;
+			return s;
+		}
+	}
+
+	/* XXX: need faster way */
+	for (id = USBP_STRING_ID_MIN;
+	    id <= USBP_STRING_ID_MAX &&
+	    __BITMAP_ISSET(id, &usbdev->string_id_map);
+		++id) {
+	}
+
+	DPRINTF(5, ("%s new id=%d\n", __func__, id));
+	
+	if (id > USBP_STRING_ID_MAX) {
+		aprint_error_dev(usbdev->usbp, "Too many strings");
+		s = usbdev->empty_string;
+		s->refcount++;
+		return s;
+	}
+	    
+	s = kmem_alloc(sizeof *s + len + 1, KM_SLEEP);
+	if (s == NULL) {
+		aprint_error_dev(usbdev->usbp, "out of memory for a string");
+		s = usbdev->empty_string;
+		DPRINTF(5, ("%s empty_string=%p\n", __func__, s));
+		s->refcount++;
+		return s;
+	}
+
+	DPRINTF(5, ("%s new entry\n", __func__));
+
+	tmp = (uint8_t *)s + sizeof (*s);
+	memcpy(tmp, string, len+1);
+	s->str = tmp;
+	s->refcount = 1;
+	s->id = id;
+	__BITMAP_SET(id, &usbdev->string_id_map);
+	SIMPLEQ_INSERT_HEAD(&usbdev->string_list, s, next);
+
+	return s;
+}
+
+void
+usbp_release_string(struct usbp_device *usbdev, struct usbp_string *str)
+{
+	if (--(str->refcount) <= 0) {
+		__BITMAP_CLR(str->id, &usbdev->string_id_map);
+		SIMPLEQ_REMOVE(&usbdev->string_list, str, usbp_string, next);
+		kmem_free(str, sizeof *str + strlen(str->str) + 1);
+	}
+}
+
+#if 0
+static usb_string_descriptor_t *
+usbp_string_descriptor(struct usbp_device *dev, u_int8_t id)
+{
+	static usb_string_descriptor_t sd0;
+	static usb_string_descriptor_t sd1;
+	usb_string_descriptor_t *sd;
+
+	/* handle the special string ids */
+	switch (id) {
+	case USB_LANGUAGE_TABLE:
+		sd0.bLength = 4;
+		sd0.bDescriptorType = UDESC_STRING;
+		USETW(sd0.bString[0], 0x0409 /* en_US */);
+		return &sd0;
+
+	case USBP_EMPTY_STRING_ID:
+		sd1.bLength = 2;
+		sd1.bDescriptorType = UDESC_STRING;
+		return &sd1;
+	}
+
+	/* check if the string id is valid */
+	if (id > dev->string_id)
+		return NULL;
+
+	/* seek and return the descriptor of a non-empty string */
+	id -= USBP_STRING_ID_MIN;
+	sd = dev->sdesc;
+	while (id-- > 0)
+		sd = (usb_string_descriptor_t *)((char *)sd + sd->bLength);
+	return sd;
+}
+#endif
+
+static size_t
+make_utf16(usb_string_descriptor_t *dest, const char *s)
+{
+	int i;
+
+	/* TODO: UTF-8 -> UTF-16 */
+	for (i=0; s[i] && i < __arraycount(dest->bString); ++i) {
+		USETW(dest->bString[i], s[i]);
+	}
+	return 2 * i;
+}
+
+static const usb_string_descriptor_t *
+get_string_descriptor(struct usbp_device *dev, int index)
+{
+	const static struct {
+		uByte bLength;
+		uByte bDescriptorType;
+		uWord bString[1];
+	} sd_langtbl = {
+		.bLength = 4,
+		.bDescriptorType = UDESC_STRING,
+		.bString = {{0x09, 0x04}}, /* en_US */
+	}, sd_empty = {
+		.bLength = 2,
+		.bDescriptorType = UDESC_STRING
+	};
+	const usb_string_descriptor_t *sdp = NULL;
+	struct usbp_string *s;
+
+	/* handle the special string ids */
+	switch (index) {
+	case USB_LANGUAGE_TABLE:
+		sdp = (const usb_string_descriptor_t *)&sd_langtbl;
+		break;
+
+	case USBP_EMPTY_STRING_ID:
+		sdp = (const usb_string_descriptor_t *)&sd_empty;
+		break;
+	default:		
+		sdp = NULL;
+		SIMPLEQ_FOREACH(s, &dev->string_list, next) {
+			usb_string_descriptor_t *p;
+			if (s->id == index) {
+				p = &dev->string_descriptor;
+				p->bLength = 2 + make_utf16(p, s->str);
+				p->bDescriptorType = UDESC_STRING;
+
+				sdp = p;
+				break;
+			}
+		}
+		if (sdp == NULL) {
+			aprint_error_dev(dev->usbp,
+			    "Unkown string descriptor requested (%d)\n", index);
+			return NULL;
+		}
+	}
+
+	return sdp;
+}
+
+
+
+void
+usbp_init_interface(struct usbp_device *dev, struct usbp_interface *iface)
+{
+	memset(iface, 0, sizeof *iface);
+	iface->usbd.device = &dev->usbd;
 }

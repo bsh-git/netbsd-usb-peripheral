@@ -148,6 +148,9 @@ usbd_status
 usbd_open_pipe(usbd_interface_handle iface, u_int8_t address,
 	       u_int8_t flags, usbd_pipe_handle *pipe)
 {
+	DPRINTFN(3,("usbd_open_pipe: iface=%p address=0x%x flags=0x%x NumEndpoints=%d\n",
+		iface, address, flags, iface->idesc->bNumEndpoints));
+
 	return (usbd_open_pipe_ival(iface, address, flags, pipe,
 				    USBD_DEFAULT_INTERVAL));
 }
@@ -160,9 +163,6 @@ usbd_open_pipe_ival(usbd_interface_handle iface, u_int8_t address,
 	struct usbd_endpoint *ep;
 	usbd_status err;
 	int i;
-
-	DPRINTFN(3,("usbd_open_pipe: iface=%p address=0x%x flags=0x%x NumEndpoints=%d\n",
-		iface, address, flags, iface->idesc->bNumEndpoints));
 
 	for (i = 0; i < iface->idesc->bNumEndpoints; i++) {
 		ep = &iface->endpoints[i];

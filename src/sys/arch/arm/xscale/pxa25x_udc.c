@@ -1,5 +1,5 @@
 /*	$NetBSD$ */
-/* Copyright (c) 2015 Hiroyuki Bessho <bsh@netbsd.org>
+/* Copyright (c) 2015, 2016 Hiroyuki Bessho <bsh@netbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -68,13 +68,6 @@ struct pxaudc_xfer {
 	u_int16_t		 frmlen;
 };
 
-#if 0
-struct pxaudc_pipe {
-	struct usbd_pipe	 pipe;
-//	LIST_ENTRY(pxaudc_pipe)	 list;
-};
-#endif
-
 void		 pxa25xudc_enable(struct pxaudc_softc *);
 void		 pxa25xudc_disable(struct pxaudc_softc *);
 
@@ -114,6 +107,8 @@ static void pxaudc_epN_intr(struct pxaudc_softc *, int);
 static void pxaudc_get_lock(struct usbd_bus *bus, kmutex_t **mutex);
 static usbd_status pxaudc_new_device(device_t dev, usbd_bus_handle bus, int a,
     int b, int c, struct usbd_port *port);
+static 	usbd_status pxaudc_select_endpoint(struct usbp_bus *, struct usbp_endpoint_request *, u_int);
+static usbd_status pxaudc_enable_bus(struct usbp_bus *, bool);
 
 
 #if NUSBP > 0
@@ -128,7 +123,6 @@ struct usbd_bus_methods pxaudc_bus_methods = {
 	pxaudc_freex,
 	pxaudc_get_lock,
 	pxaudc_new_device
-	
 };
 
 struct usbd_pipe_methods pxaudc_ctrl_methods = {
@@ -221,7 +215,8 @@ pxaudc_attach(device_t parent, device_t self, void *aux)
 #endif
 
 int
-pxaudc_attach_sub(device_t self, struct pxaip_attach_args *pxa)
+pxaudc_attach_sub(device_t self, struct pxaip_attach_args *pxa,
+    const struct usbp_bus_methods *platform_bus_methods)
 {
 	struct pxaudc_softc *sc = device_private(self);
 #if NUSBP > 0
@@ -241,7 +236,6 @@ pxaudc_attach_sub(device_t self, struct pxaip_attach_args *pxa)
 		return -1;
 	}
 	sc->sc_size = pxa->pxa_size;
-
 	bus_space_barrier(sc->sc_iot, sc->sc_ioh, 0, sc->sc_size,
 	    BUS_SPACE_BARRIER_READ|BUS_SPACE_BARRIER_WRITE);
 
@@ -265,6 +259,19 @@ pxaudc_attach_sub(device_t self, struct pxaip_attach_args *pxa)
 
 	/* Set up the bus struct. */
 	sc->sc_bus.usbd.methods = &pxaudc_bus_methods;
+	sc->sc_bus.usbp_methods = &sc->usbp_bus_methods;
+	if (sc->usbp_bus_methods.select_endpoint == NULL)
+		sc->usbp_bus_methods.select_endpoint = pxaudc_select_endpoint;
+	if (sc->usbp_bus_methods.enable == NULL)
+		sc->usbp_bus_methods.enable = pxaudc_enable_bus;
+#ifdef	DIAGNOSTIC
+	if (sc->sc_bus.usbp_methods->is_connected == NULL) {
+		aprint_error_dev(self,
+		    "platform dependent code doesn't provide "
+		    "a method to detect a connection to a host.");
+	}
+#endif
+
 	sc->sc_bus.usbd.pipe_size = sizeof(struct usbd_pipe);
 	sc->sc_bus.ep0_maxp = PXAUDC_EP0MAXP;
 	sc->sc_bus.usbd.usbrev = USBREV_1_1;
@@ -275,13 +282,14 @@ pxaudc_attach_sub(device_t self, struct pxaip_attach_args *pxa)
 	uaa.busname = "usbp";
 	uaa.bus = &sc->sc_bus;
 
-	/* Attach logical device and function. */
+	/* Attach USB interfaces */
 	(void)config_found(self, &uaa, NULL);
 
+#if 0
 	/* Enable the controller unless we're now acting as a host. */
 	if (!pxaudc_is_host(sc))
 		pxa25xudc_enable(sc);
-
+#endif
 #endif	/* NUSBP > 0 */
 
 	return 0;
@@ -1289,5 +1297,86 @@ pxaudc_new_device(device_t dev, usbd_bus_handle bus, int a,
 					    int b, int c, struct usbd_port *port)
 {
 	printf("!!! new_device called\n");
+	return USBD_NORMAL_COMPLETION;
+}
+
+static 	usbd_status
+pxaudc_select_endpoint(struct usbp_bus *bus, struct usbp_endpoint_request *epreq, u_int map)
+{
+	static const uint8_t epspec[][4][4] = {
+		/* OUT */
+		{
+			[UE_CONTROL] = {0},
+			[UE_ISOCHRONOUS] = {4, 9, 14, 0},
+			[UE_BULK] = {2, 7, 12, 0},
+			[UE_INTERRUPT] = {0}
+		},
+		/* IN */
+		{
+			[UE_CONTROL] = {0},
+			[UE_ISOCHRONOUS] = {3, 8, 13, 0},
+			[UE_BULK] = {1, 6, 11, 0},
+			[UE_INTERRUPT] = {5, 10, 15, 0}
+		}
+	};
+	static const int type_to_packetsize [] = {
+		[UE_CONTROL] = 16,
+		[UE_ISOCHRONOUS] = 256,
+		[UE_BULK] = 64,
+		[UE_INTERRUPT] = 8
+	};
+	const uint8_t *bp;
+	int dir = UE_GET_DIR(epreq->address);
+	int index = UE_GET_ADDR(epreq->address);
+	int xfrtype = UE_GET_XFERTYPE(epreq->attributes);
+	int i;
+
+	bp = epspec[dir == UE_DIR_OUT ? 0: 1][xfrtype];
+	DPRINTF(0, ("dir=%x xfrtype=%x index=%d bp[0]=%d\n", dir, xfrtype, index, bp[0]));
+	if (index != 0) {
+		/* Endpoint address is specified explicitly.
+		   check if transfer type matches */
+		for (i=0; bp[i]; ++i) {
+			if (index == bp[i])
+				break;
+		}
+		if (bp[i] == 0) {
+			/* doesn't match */
+			index = 0;
+		}
+	}
+
+	if (index == 0) {
+		/* find a suitable endpoint */
+		for (i=0; bp[i]; ++i) {
+			DPRINTF(0, ("dir=%x xfrtype=%x i=%d bp[i]=%d\n", dir, xfrtype, i, bp[i]));
+			if ((map & (1 << bp[i])) == 0) {
+				break;
+			}
+		}
+		if (bp[i] == 0)
+			return USBD_NO_ADDR;
+		index = bp[i];
+	}
+
+	epreq->address = dir | index;
+	epreq->packetsize = type_to_packetsize[xfrtype];
+	return USBD_NORMAL_COMPLETION;
+}
+
+
+static usbd_status
+pxaudc_enable_bus(struct usbp_bus *bus, bool on)
+{
+	struct pxaudc_softc *sc = bus->usbd.hci_private;
+
+
+	if (on) {
+		pxa25xudc_enable(sc);
+	}
+	else {
+		pxa25xudc_disable(sc);
+	}
+
 	return USBD_NORMAL_COMPLETION;
 }
