@@ -183,13 +183,6 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed
 		, int depth, int port, struct usbp_port *up
 #endif
 	);
-#if 0
-static usbd_status usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
-				   struct usbd_endpoint *ep, int ival, struct usbd_pipe **pipe);
-#endif
-static void usbp_setup_default_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
-    void *priv, usb_device_request_t *req, u_int16_t flags,
-				    u_int32_t timeout, usbd_callback callback);
 static void usbp_do_request(struct usbd_xfer *xfer, void *priv, usbd_status err);
 static usbd_status usbp_transfer(struct usbd_xfer *xfer);
 static usbd_status usbp_search_interfaces(struct device *parent, struct usbp_device *dev/*, int port*/);
@@ -765,8 +758,14 @@ usbp_host_reset(struct usbp_bus *bus)
 		SIMPLEQ_REMOVE_HEAD(&dev->usbd.default_pipe->queue, next);
 	}
 #endif		
-	usbp_setup_default_xfer(dev->default_xfer, dev->usbd.default_pipe,
-	    NULL, &dev->def_req, 0, 0, usbp_do_request);
+	usbd_setup_default_xfer(dev->default_xfer, &dev->usbd,
+	    NULL,
+	    0, /* timeout */
+	    NULL, /* req */
+	    &dev->def_req,	/* buffer */
+	    sizeof (dev->def_req),	/* length */
+	    0,	/* flags */
+	    usbp_do_request);
 	usbp_transfer(dev->default_xfer);
 }
 
@@ -847,8 +846,8 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 		goto bad;
 
 	/* Insert device request xfer. */
-	usbp_setup_default_xfer(dev->default_xfer, default_pipe, NULL,
-				&dev->def_req, 0, 0, usbp_do_request);
+	usbd_setup_default_xfer(dev->default_xfer, &dev->usbd, NULL,
+	    0, NULL, &dev->def_req, sizeof (dev->def_req), 0, usbp_do_request);
 	err = usbp_transfer(dev->default_xfer);
 	if (err && err != USBD_IN_PROGRESS)
 		goto bad;
@@ -916,80 +915,6 @@ usbp_iface_endpoint(struct usbp_interface *iface, int index)
 
 	return &iface->usbd.endpoints[index];
 }
-
-#if 0
-usbd_status
-usbp_setup_pipe(struct usbp_device *dev, struct usbp_interface *iface,
-    struct usbd_endpoint *ep, int ival, struct usbd_pipe **pipe)
-{
-	struct usbd_pipe *p;
-	usbd_status err;
-
-	p = malloc(dev->usbd.bus->pipe_size, M_USB, M_NOWAIT|M_ZERO);
-	if (p == NULL)
-		return USBD_NOMEM;
-
-	p->device = &dev->usbd;
-	p->iface = &iface->usbd;
-	p->endpoint = ep;
-	ep->refcnt++;
-	p->aborting = 0;
-	p->running = 0;
-	p->refcnt = 1;
-	p->repeat = 0;
-	p->interval = ival;
-	p->methods = NULL;	/* set by bus driver in open_pipe() */
-	SIMPLEQ_INIT(&p->queue);
-	err = dev->usbd.bus->methods->open_pipe(p);
-	if (err) {
-		free(p, M_USB);
-		return err;
-	}
-	*pipe = p;
-	return USBD_NORMAL_COMPLETION;
-}
-#endif
-
-void
-usbp_setup_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
-    void *priv, void *buffer, u_int32_t length,
-		u_int16_t flags, u_int32_t timeout, usbd_callback callback);
-
-void
-usbp_setup_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
-    void *priv, void *buffer, u_int32_t length,
-    u_int16_t flags, u_int32_t timeout, usbd_callback callback)
-{
-	xfer->pipe = pipe;
-	xfer->priv = priv;
-	xfer->buffer = buffer;
-	xfer->length = length;
-	xfer->actlen = 0;
-	xfer->flags = flags;
-	xfer->timeout = timeout;
-	xfer->status = USBD_NOT_STARTED;
-	xfer->callback = callback;
-	xfer->rqflags &= ~URQ_REQUEST;
-}
-
-
-void
-usbp_setup_default_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
-    void *priv, usb_device_request_t *req, u_int16_t flags,
-    u_int32_t timeout, usbd_callback callback)
-{
-	xfer->pipe = pipe;
-	xfer->priv = priv;
-	xfer->buffer = req;
-	xfer->length = sizeof *req;
-	xfer->actlen = 0;
-	xfer->flags = flags;
-	xfer->timeout = timeout;
-	xfer->status = USBD_NOT_STARTED;
-	xfer->callback = callback;
-	xfer->rqflags |= URQ_REQUEST;
-}
-
 
 /*
  * Change device state from Default to Address, or change the device address
@@ -1382,7 +1307,7 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 		}
 		printf("%s: reply IN data length=%d\n", __func__, UGETW(req->wLength));
 		/* Transfer IN data in response to the request. */
-		usbp_setup_xfer(dev->data_xfer, dev->usbd.default_pipe,
+		usbd_setup_xfer(dev->data_xfer, dev->usbd.default_pipe,
 		    NULL, data, UGETW(req->wLength), 0, 0, NULL);
 		err = usbp_transfer(dev->data_xfer);
 		if (err && err != USBD_IN_PROGRESS) {
@@ -1393,8 +1318,8 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 
 next:
 	/* Schedule another request transfer. */
-	usbp_setup_default_xfer(dev->default_xfer, dev->usbd.default_pipe,
-	    NULL, &dev->def_req, 0, 0, usbp_do_request);
+	usbd_setup_default_xfer(dev->default_xfer, &dev->usbd, NULL,
+	    0, NULL, &dev->def_req, sizeof (dev->def_req), 0, usbp_do_request);
 	err = usbp_transfer(dev->default_xfer);
 	if (err && err != USBD_IN_PROGRESS) {
 		DPRINTF(0,("usbp_do_request: ctrl xfer=%p, %s\n", xfer,
