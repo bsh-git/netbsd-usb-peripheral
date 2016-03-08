@@ -10,7 +10,6 @@
 #ifndef _USBP_H
 #define _USBP_H
 
-struct usbp_function;
 struct usbp_config;
 struct usbp_interface;
 struct usbp_endpoint;
@@ -33,20 +32,6 @@ struct usbp_bus_attach_args {
 	const char *busname;
 	struct usbp_bus *bus;
 };
-
-struct usbp_function_methods {
-	usbd_status (*set_config)(struct usbp_function *, struct usbp_config *);
-	usbd_status (*do_request)(struct usbp_function *,
-	    usb_device_request_t *req, void **data);
-};
-
-struct usbp_function {
-	device_t      dev; 		/* base device */
-	//struct device bdev;
-	/* filled in by function driver */
-	struct usbp_function_methods *methods;
-};
-
 
 struct usbp_bus {
 	struct usbd_bus	usbd;
@@ -122,31 +107,10 @@ struct usbp_interface {
 	const struct usbp_interface_methods *methods;
 
 	SIMPLEQ_ENTRY(usbp_interface) next;	// list of interfaces in a device.
-//	SIMPLEQ_HEAD(, usbp_endpoint) endpoint_head;
 };
 
 void usbp_init_interface(struct usbp_device *, struct usbp_interface *);
-
 #define	usbp_interface_to_device(iface)	((struct usbp_device *)iface->usbd.device)
-
-#if 0
-void usbp_devinfo_setup(struct usbp_device *dev, u_int8_t devclass,
-			u_int8_t subclass, u_int8_t proto, u_int16_t vendor, u_int16_t product,
-			u_int16_t device, const char *manf, const char *prod, const char *ser);
-
-usbd_status usbp_add_config_desc(struct usbp_config *uc, usb_descriptor_t *d,
-				 usb_descriptor_t **dp);
-usbd_status usbp_add_config(struct usbp_device *dev, struct usbp_config **ucp);
-usbd_status usbp_end_config(struct usbp_config *uc);
-
-usbd_status usbpOLD_add_interface(struct usbp_config *uc, u_int8_t bInterfaceClass,
-			       u_int8_t bInterfaceSubClass, u_int8_t bInterfaceProtocol,
-			       const char *string, struct usbp_interface **uip);
-usbd_status
-usbp_add_endpoint(struct usbp_interface *ui, u_int8_t bEndpointAddress,
-		  u_int8_t bmAttributes, u_int16_t wMaxPacketSize, u_int8_t bInterval,
-		  struct usbd_endpoint **uep);
-#endif
 
 int usbp_interface_number(struct usbp_interface *iface);
 u_int8_t usbd_endpoint_address(struct usbd_endpoint *);
@@ -169,8 +133,6 @@ usbd_endpoint_attributes(struct usbd_endpoint *endpoint)
 	return endpoint->edesc->bmAttributes;
 }
 
-//#define	usbp_endpoint_attributes(endpoint)	usbd_endpoint_attributes(&endpoint->usbd)
-
 usbd_status usbp_open_pipe(struct usbp_interface *iface, int index, int flags, struct usbd_pipe **pipe);
 
 #if 0
@@ -184,13 +146,6 @@ static inline struct usbd_xfer *usbp_alloc_xfer(struct usbp_device *dev)
 {
 	return usbd_alloc_xfer((struct usbd_device *)dev);
 }
-
-/* XXX usbd_alloc_buffer() ? */
-void * usbp_alloc_buffer(struct usbd_xfer *xfer, u_int32_t size);
-
-void usbp_setup_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pipe,
-		     void *priv, void *buffer, u_int32_t length,
-		     u_int16_t flags, u_int32_t timeout, usbd_callback callback);
 
 usb_device_descriptor_t *usbp_device_descriptor(struct usbp_device *dev);
 

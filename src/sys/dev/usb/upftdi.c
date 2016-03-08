@@ -120,7 +120,6 @@ void		upftdi_watchdog(struct ifnet *ifp);
 void		upftdi_stop(struct upftdi_softc *);
 void		upftdi_start_timeout (void *);
 
-//static usbd_status upftdi_set_config(struct usbp_function *, struct usbp_config *);
 static void upftdi_attach_ucom(device_t, struct usbp_device *, int, struct usbd_endpoint *, struct usbd_endpoint *);
 
 
@@ -455,16 +454,6 @@ done:
 
 
 #if 0
-static usbd_status
-upftdi_set_config(struct usbp_function *fun, struct usbp_config *config)
-{
-	DPRINTF(("%s: fun=%p\n", __func__, fun));
-	return USBD_NORMAL_COMPLETION;
-}
-#endif
-
-
-#if 0
 static int
 upftdi_open(void *vsc, int portno)
 {
@@ -537,53 +526,10 @@ upftdi_configured(struct usbp_interface *iface)
 	sc->sc_ncomdevs_active = 0;
 
 	for (idx=0; idx < n_comdevs; ++idx) {
-#if 0
-		struct upftdi_comdev *com;
-
-		com = &sc->sc_comdev[idx];
-		/* Preallocate xfers and data buffers. */
-		com->xfer_in = usbp_alloc_xfer(dev);
-		com->xfer_out = usbp_alloc_xfer(dev);
-
-
-		com->buffer_in = usbd_alloc_buffer(com->xfer_in, UPFTDI_BUFSZ);
-		com->buffer_out = usbd_alloc_buffer(com->xfer_out, UPFTDI_BUFSZ);
-		if (com->buffer_in == NULL || com->buffer_out == NULL) {
-			printf(": usbf_alloc_buffer failed\n");
-			break;
-		}
-
-		/* Open the bulk pipes. */
-		err = usbp_open_pipe(com->iface,
-		    usbd_endpoint_address(com->ep_out), &com->pipe_out) ||
-		    usbp_open_pipe(com->iface,
-			usbd_endpoint_address(com->ep_in), &com->pipe_in);
-		if (err) {
-			printf(": usbf_open_pipe failed\n");
-			return;
-		}
-#endif
-
 		upftdi_attach_ucom(sc->sc_dev, udev, idx,
 		    &iface->usbd.endpoints[idx * 2],
 		    &iface->usbd.endpoints[idx * 2 + 1]);
 
-#if 0
-		/* Get ready to receive packets. */
-		usbd_setup_xfer(com->xfer_out, com->pipe_out, com,
-		    com->buffer_out, UPFTDI_BUFSZ, USBD_SHORT_XFER_OK, 0, upftdi_rxeof);
-		err = usbd_transfer(com->xfer_out);
-		if (err && err != USBD_IN_PROGRESS) {
-			printf(": usbf_transfer failed err=%d\n", err);
-
-#if 0			/* FixME: this crashes the kernel */
-			config_detach(com->ucomdev, DETACH_FORCE);
-#endif
-			/* XXX: release other resources */
-			break;
-		}
-#endif
-		
 		++sc->sc_ncomdevs_active;
 	}
 

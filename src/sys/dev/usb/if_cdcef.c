@@ -97,9 +97,6 @@ struct cdcef_softc {
 int		cdcef_match(device_t, cfdata_t, void *);
 void		cdcef_attach(device_t, device_t, void *);
 
-usbd_status	cdcef_do_request(struct usbp_function *,
-				 usb_device_request_t *, void **);
-
 void		cdcef_start(struct ifnet *);
 
 void		cdcef_txeof(struct usbd_xfer *, void *,
@@ -123,11 +120,6 @@ static usbd_status cdcef_fixup_idesc(struct usbp_interface *, usb_interface_desc
 
 CFATTACH_DECL_NEW(cdcef, sizeof (struct cdcef_softc),
     cdcef_match, cdcef_attach, NULL, NULL);
-
-struct usbp_function_methods cdcef_methods = {
-	NULL,			/* set_config */
-	cdcef_do_request
-};
 
 static const struct usbp_interface_methods cdcef_if_methods = {
 	cdcef_on_configured,
@@ -341,14 +333,6 @@ cdcef_on_unconfigured(struct usbp_interface *iface)
 {
 	DPRINTF(5, ("%s\n", __func__));
 	return USBD_NORMAL_COMPLETION;
-}
-
-usbd_status
-cdcef_do_request(struct usbp_function *fun, usb_device_request_t *req,
-    void **data)
-{
-	printf("cdcef_do_request\n");
-	return USBD_STALLED;
 }
 
 void
