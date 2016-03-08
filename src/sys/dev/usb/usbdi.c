@@ -70,14 +70,17 @@ Static void usbd_start_next(usbd_pipe_handle);
 Static usbd_status usbd_open_pipe_ival
 	(usbd_interface_handle, u_int8_t, u_int8_t, usbd_pipe_handle *, int);
 
-static inline int
+static inline bool
 usbd_xfer_isread(usbd_xfer_handle xfer)
 {
-	if (xfer->rqflags & URQ_REQUEST)
-		return (xfer->request.bmRequestType & UT_READ);
-	else
-		return (xfer->pipe->endpoint->edesc->bEndpointAddress &
-			UE_DIR_IN);
+	bool dir_in = 
+	    (xfer->rqflags & URQ_REQUEST) ?
+	    (xfer->request.bmRequestType & UT_READ) :
+	    (xfer->pipe->endpoint->edesc->bEndpointAddress & UE_DIR_IN);
+
+	if (xfer->pipe->flags & USBD_PERIPHERAL)
+		return !dir_in;
+	return dir_in;
 }
 
 #if defined(USB_DEBUG) || defined(EHCI_DEBUG) || defined(OHCI_DEBUG)
@@ -148,8 +151,8 @@ usbd_status
 usbd_open_pipe(usbd_interface_handle iface, u_int8_t address,
 	       u_int8_t flags, usbd_pipe_handle *pipe)
 {
-	DPRINTFN(3,("usbd_open_pipe: iface=%p address=0x%x flags=0x%x NumEndpoints=%d\n",
-		iface, address, flags, iface->idesc->bNumEndpoints));
+	DPRINTFN(3,("usbd_open_pipe: iface=%p idesc=%p address=0x%x flags=0x%x NumEndpoints=%d\n",
+		iface, iface->idesc, address, flags, iface->idesc->bNumEndpoints));
 
 	return (usbd_open_pipe_ival(iface, address, flags, pipe,
 				    USBD_DEFAULT_INTERVAL));
@@ -266,8 +269,10 @@ usbd_transfer(usbd_xfer_handle xfer)
 	usbd_status err;
 	unsigned int size, flags;
 
-	DPRINTFN(5,("usbd_transfer: xfer=%p, flags=%#x, pipe=%p, running=%d\n",
-		    xfer, xfer->flags, pipe, pipe->running));
+	DPRINTFN(5,("usbd_transfer: xfer=%p, flags=%#x, pipe=%p, running=%d endpoint=0x%x (%s)\n",
+		xfer, xfer->flags, pipe, pipe->running,
+		xfer->pipe->endpoint->edesc->bEndpointAddress,
+		usbd_xfer_isread(xfer) ? "read" : "write"));
 
 #ifdef USB_DEBUG
 	if (usbdebug > 5)

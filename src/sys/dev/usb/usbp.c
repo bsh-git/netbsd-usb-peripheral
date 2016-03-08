@@ -833,8 +833,8 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 	dev->usbd.def_ep_desc.bInterval = 0;
 
 	/* Establish the default pipe. */
-//	err = usbp_setup_pipe(dev, NULL, (struct usbd_endpoint *)&dev->usbd.def_ep, 0, &default_pipe);
-	err = usbd_setup_pipe(&dev->usbd, NULL, &dev->usbd.def_ep, 0, &default_pipe);
+	err = usbd_setup_pipe_flags(&dev->usbd, NULL, &dev->usbd.def_ep, 0, &default_pipe,
+	    USBD_PERIPHERAL);
 	if (err)
 		goto bad;
 
@@ -900,7 +900,8 @@ usbp_open_pipe(struct usbp_interface *iface, int index, int flags, struct usbd_p
 	if (ep == NULL)
 		return USBD_INVAL;
 
-	return usbd_open_pipe(&iface->usbd, ep->edesc->bEndpointAddress, flags, pipe);
+	return usbd_open_pipe(&iface->usbd, ep->edesc->bEndpointAddress,
+	    flags | USBD_PERIPHERAL, pipe);
 }
 
 
