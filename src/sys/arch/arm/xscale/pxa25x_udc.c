@@ -399,6 +399,8 @@ pxa25xudc_enable(struct pxaudc_softc *sc)
 				CSR_WRITE_4(sc, USBDC_UDCCS(i),
 					    USBDC_UDCCS_RPC|USBDC_UDCCS_SST);
 
+			DPRINTF(10,("%s: ep%d-%s\n", __func__,
+				i, dir == UE_DIR_IN ? "in" : "out"));
 		}
 	}
 
@@ -420,6 +422,7 @@ pxa25xudc_enable(struct pxaudc_softc *sc)
 
 	DPRINTF(10, ("%s: UDCCR=%x\n", __func__, CSR_READ_4(sc, USBDC_UDCCR)));
 
+	sc->sc_enabled = true;
 
 //	callout_reset(&sc->callout, hz/10, check, sc);
 
@@ -438,6 +441,7 @@ pxa25xudc_disable(struct pxaudc_softc *sc)
 	/* Stop the clocks. */
 	pxa2x0_clkman_config(CKEN_USBDC, 0);
 
+	sc->sc_enabled = false;
 	DPRINTF(10, ("%s: UDCCR=%x\n", __func__, CSR_READ_4(sc, USBDC_UDCCR)));
 }
 
@@ -648,8 +652,9 @@ pxaudc_write(struct pxaudc_softc *sc, struct usbd_xfer *xfer)
 #endif
 
 #ifdef DEBUG_TX
-	printf("writing data to endpoint %x, xlen %x xact %x\n",
-		epidx, xfer->length, xfer->actlen);
+	printf("%s: writing data to endpoint %x, xlen %d xact %d\n",
+	    __func__,
+	    epidx, xfer->length, xfer->actlen);
 #endif
 
 
@@ -679,8 +684,8 @@ pxaudc_write(struct pxaudc_softc *sc, struct usbd_xfer *xfer)
 			}
 		}
 		xfer->status = USBD_NORMAL_COMPLETION;
-#ifdef DEBUG_TX_PKT
-		printf("packet complete %x\n", xfer->actlen);
+#ifdef DEBUG_TX
+		printf("%s: packet complete %x\n", __func__, xfer->actlen);
 #endif
 		usbp_transfer_complete(xfer);
 		return;
@@ -711,14 +716,18 @@ pxaudc_write(struct pxaudc_softc *sc, struct usbd_xfer *xfer)
 	}
 
 #ifdef DEBUG_TX
-	printf(" wrote %d %d\n", tlen, xfer->actlen);
+	printf(" wrote %d %d maxp=%d flags=%x cr=%x uicr0=%x uicr1=%x\n",
+	    tlen, xfer->actlen, maxp, xfer->flags,
+	    CSR_READ_4(sc, USBDC_UDCCR),
+	    CSR_READ_4(sc, USBDC_UICR0),
+	    CSR_READ_4(sc, USBDC_UICR1));
 	if (xfer->actlen == 0) {
 		printf("whoa, write_ep called, but no free space\n");
 	}
 #endif
 	if (xfer->actlen >= xfer->length) {
 		if ((xfer->actlen % maxp) != 0) {
-			if (xfer->flags & USBD_FORCE_SHORT_XFER) {
+			if (1 /*xfer->flags & USBD_FORCE_SHORT_XFER*/) {
 				CSR_SET_4(sc, USBDC_UDCCS(epidx), USBDC_UDCCS_TSP);
 #ifdef DEBUG_TX
 				printf("setting short packet on %d csr=%x\n", epidx,
@@ -807,12 +816,15 @@ pxaudc_intr1(struct pxaudc_softc *sc)
 	int i;
 	int s;
 
+
 	s = splhardusb();
 	isr = sc->sc_isr;
 	sc->sc_isr = 0;
 	sc->sc_bus.intr_context++;
 	splx(s);
 
+
+	DPRINTF(10, ("%s: isr=%x\n", __func__, isr));
 
 	/* Handle USB RESET condition. */
 	if (isr & INTR_RESET) {
@@ -851,7 +863,7 @@ pxaudc_epN_intr(struct pxaudc_softc *sc, int ep)
 	struct usbd_endpoint *endpoint;
 	int dir;
 
-	DPRINTF(10, ("ep%d intr ppipe=%p\n", ep, sc->sc_pipe[ep]));
+	DPRINTF(10, ("%s: ep%d intr ppipe=%p\n", __func__, ep, sc->sc_pipe[ep]));
 	    
 	/* faster method of determining direction? */
 	pipe = sc->sc_pipe[ep];
@@ -879,7 +891,9 @@ pxaudc_write_epN(struct pxaudc_softc *sc, int ep)
 	struct usbd_pipe *pipe = NULL;
 	struct usbd_xfer *xfer = NULL;
 
-	DPRINTF(10, ("write ep%d ppipe=%p\n", ep, sc->sc_pipe[ep]));
+	DPRINTF(10, ("%s: write ep%d pipe=%p xfer=%p\n", __func__,
+		ep, sc->sc_pipe[ep],
+		sc->sc_pipe[ep] ? SIMPLEQ_FIRST(&sc->sc_pipe[ep]->queue) : NULL));
 
 	pipe = sc->sc_pipe[ep];
 
@@ -1013,6 +1027,16 @@ pxaudc_open(struct usbd_pipe *pipe)
 	
 	sc->sc_pipe[ep_idx] = pipe;
 	sc->sc_npipe++;
+
+	
+	if (sc->sc_enabled) {
+		/* Enable interrupts for the endpoint */
+		u_int icrreg = USBDC_UICR0;
+		if (ep_idx >= 8)
+			icrreg = USBDC_UICR1;
+
+		CSR_CLR_4(sc, icrreg, (1 << (ep_idx % 8)));
+	}
 
 	splx(s);
 	return USBD_NORMAL_COMPLETION;
@@ -1181,6 +1205,8 @@ pxaudc_bulk_transfer(struct usbd_xfer *xfer)
 {
 	usbd_status err;
 
+	DPRINTF(5, ("%s: xfer=%p\n", __func__, xfer));
+
 	/* Insert last in queue. */
 	err = usbp_insert_transfer(xfer);
 	if (err)
@@ -1201,7 +1227,7 @@ pxaudc_bulk_start(struct usbd_xfer *xfer)
 	int iswrite = (usbd_endpoint_dir(pipe->endpoint) == UE_DIR_IN);
 	int s;
 
-	DPRINTF(0,("%s: ep%d bulk-%s start, xfer=%p, len=%u\n", DEVNAME(sc),
+	DPRINTF(0,("%s: %s: ep%d bulk-%s start, xfer=%p, len=%u\n", DEVNAME(sc), __func__,
 	    usbd_endpoint_index(pipe->endpoint), iswrite ? "in" : "out",
 	    xfer, xfer->length));
 
@@ -1231,7 +1257,7 @@ pxaudc_bulk_done(struct usbd_xfer *xfer)
 	struct pxaudc_softc *sc = pipe->device->bus->hci_private;
 	int iswrite = (usbd_endpoint_dir(pipe->endpoint) == UE_DIR_IN);
 
-	DPRINTF(0,("%s: ep%d bulk-%s start, xfer=%p, len=%u\n", DEVNAME(sc),
+	DPRINTF(0,("%s: %s: ep%d bulk-%s done, xfer=%p, len=%u\n", DEVNAME(sc), __func__,
 		ep, iswrite ? "in" : "out",
 		xfer, xfer->length));
 #endif

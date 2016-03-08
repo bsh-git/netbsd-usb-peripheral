@@ -95,6 +95,7 @@ struct pxaudc_softc {
 
 	callout_t	sc_callout;
 	kmutex_t	sc_lock;
+	bool		sc_enabled;
 
 	struct usbp_bus_methods usbp_bus_methods;
 };

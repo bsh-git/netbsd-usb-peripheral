@@ -65,17 +65,6 @@ int usbdebug = 11;
 Static void	usb_task_thread(void *);
 
 
-static inline int
-usbd_xfer_isread(usbd_xfer_handle xfer)
-{
-	if (xfer->rqflags & URQ_REQUEST)
-		return (xfer->request.bmRequestType & UT_READ);
-	else
-		return (xfer->pipe->endpoint->edesc->bEndpointAddress &
-			UE_DIR_IN);
-}
-
-
 Static const char * const usbd_error_strs[] = {
 	"NORMAL_COMPLETION",
 	"IN_PROGRESS",
@@ -96,6 +85,7 @@ Static const char * const usbd_error_strs[] = {
 	"SHORT_XFER",
 	"STALLED",
 	"INTERRUPTED",
+	"NOT_FOR_US",
 	"XXX",
 };
 

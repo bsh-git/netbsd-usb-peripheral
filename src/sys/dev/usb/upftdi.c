@@ -37,6 +37,7 @@ __KERNEL_RCSID(0, "$NetBSD$");
 #include <sys/device.h>
 #include <sys/conf.h>
 #include <sys/tty.h>
+#include <sys/kmem.h>
 
 #include <dev/usb/usb.h>
 
@@ -55,7 +56,7 @@ __KERNEL_RCSID(0, "$NetBSD$");
 #ifdef UPFTDI_DEBUG
 #define DPRINTF(x)	if (upftdidebug) printf x
 #define DPRINTFN(n,x)	if (upftdidebug>(n)) printf x
-int upftdidebug = 0;
+int upftdidebug = 20;
 #else
 #define DPRINTF(x)
 #define DPRINTFN(n,x)
@@ -76,15 +77,17 @@ int upftdidebug = 0;
 #define	MAXCOMDEVICES  4
 
 struct upftdi_softc {
-	struct usbp_function	sc_fun;
-	struct usbp_config	*sc_config;
+	device_t	sc_dev;
+	struct usbp_interface	iface;
 	int			sc_rxeof_errors;
 
 	bool sc_dying;
 
-	int sc_ncomdevs;
+	int sc_ncomdevs_requested;
+	int sc_ncomdevs_active;
+
 	struct upftdi_comdev {
-		struct usbp_interface	*iface;
+		device_t ucomdev;
 		struct usbd_endpoint	*ep_in;
 		struct usbd_endpoint	*ep_out;
 		struct usbd_pipe	*pipe_in;
@@ -94,18 +97,15 @@ struct upftdi_softc {
 		void			*buffer_in;
 		void			*buffer_out;
 
-		device_t ucomdev;
-
-		struct upftdi_softc *softc;
-
 	} sc_comdev[MAXCOMDEVICES];
 };
+
 
 static int	upftdi_match(device_t, cfdata_t, void *);
 static void	upftdi_attach(device_t, device_t, void *);
 
-static usbd_status	upftdi_do_request(struct usbp_function *,
-				 usb_device_request_t *, void **);
+static usbd_status	upftdi_do_request(struct usbp_interface *,
+			    usb_device_request_t *, void **);
 
 void		upftdi_start(struct ifnet *);
 
@@ -120,25 +120,30 @@ void		upftdi_watchdog(struct ifnet *ifp);
 void		upftdi_stop(struct upftdi_softc *);
 void		upftdi_start_timeout (void *);
 
-static usbd_status upftdi_set_config(struct usbp_function *, struct usbp_config *);
-static void upftdi_attach_ucom(device_t, struct usbp_device *, int);
+//static usbd_status upftdi_set_config(struct usbp_function *, struct usbp_config *);
+static void upftdi_attach_ucom(device_t, struct usbp_device *, int, struct usbd_endpoint *, struct usbd_endpoint *);
 
+
+static usbd_status upftdi_configured(struct usbp_interface *);
+static usbd_status upftdi_unconfigured(struct usbp_interface *);
+
+const struct usbp_interface_methods upftdi_if_methods = {
+	upftdi_configured,
+	upftdi_unconfigured,
+	upftdi_do_request,
+	NULL
+};
 
 CFATTACH_DECL_NEW(upftdi, sizeof (struct upftdi_softc),
     upftdi_match, upftdi_attach, NULL, NULL);
 
-struct usbp_function_methods upftdi_methods = {
-	upftdi_set_config,		/* set_config */
-	upftdi_do_request
-};
-
 //static int upftdi_open(void *vsc, int portno);
-static void upftdi_read(void *vsc, int portno, u_char **ptr, u_int32_t *count);
+//static void upftdi_read(void *vsc, int portno, u_char **ptr, u_int32_t *count);
 static void upftdi_write(void *vsc, int portno, u_char *to, u_char *from, u_int32_t *count);
 
 static struct ucom_methods upftdi_ucom_methods = {
 //	.ucom_open = upftdi_open,
-	.ucom_read = upftdi_read,
+//	.ucom_read = upftdi_read,
 	.ucom_write = upftdi_write,
 };
 
@@ -163,159 +168,97 @@ static void
 upftdi_attach(device_t parent, device_t self, void *aux)
 {
 	struct upftdi_softc *sc = device_private(self);
-	struct usbp_function_attach_args *uaa = aux;
+	struct usbp_interface_attach_args *uaa = aux;
 	struct usbp_device *dev = uaa->device;
 	usbd_status err;
 	int n_comdevs = 1;
-	int idx;
 	//int s;
 
 
-	DPRINTF(("%s  dev=%p sc=%p upftdi_methods=%p\n", __func__, dev,
+	static const struct usbp_device_info devdata = {
+		.class_id = UDCLASS_IN_INTERFACE,
+		.subclass_id = 0,
+		.protocol = 0,
+		.vendor_id = USB_VENDOR_FTDI,
+		.product_id = USB_PRODUCT_FTDI_SERIAL_230X,
+		.bcd_device = UPFTDI_DEVICE_CODE,
+		.manufacturer_name = UPFTDI_VENDOR_STRING,
+		.product_name = UPFTDI_PRODUCT_STRING,
+		.serial = UPFTDI_SERIAL_STRING
+	};
+#if 0
+	struct usbp_interface_spec *ispec = alloca(sizeof (struct usbp_interface_spec) +
+	    n_comdevs * 2 * sizeof (struct usbp_endpoint_request));
+
+	static const struct usbp_endpoint_request
+	    in_spec ={.address = UE_DIR_IN | 0,
+		      .attributes = UE_BULK,
+		      .packetsize = 64},
+	    out_spec = {.address = UE_DIR_OUT | 0,
+			.attributes = UE_BULK,
+			.packetsize = 64};
+
+
+	ispec->class_id = UICLASS_VENDOR;
+	ispec->subclass_id = UICLASS_VENDOR;
+	ispec->protocol = 0;
+	ispec->pipe0_usage = USBP_PIPE0_OCCUPIED;
+	ispec->description = NULL;
+	ispec->num_endpoints = n_comdevs * 2;
+
+	for (idx=0; idx < n_comdevs; ++idx) {
+		ispec->endpoints[idx * 2] = in_spec;
+		ispec->endpoints[idx * 2 + 1] = out_spec;
+	}
+#else
+	static struct usbp_interface_spec _ispec = {
+		.class_id = UICLASS_VENDOR,
+		.subclass_id = UICLASS_VENDOR,
+		.protocol = 0,
+		.pipe0_usage = USBP_PIPE0_EXCLUSIVE,
+		.description = NULL,
+		.num_endpoints = 2,
+		.endpoints = {
+			{.address = UE_DIR_IN | 0, .attributes = UE_BULK, .packetsize = 64},
+			{.address= UE_DIR_OUT | 0, .attributes = UE_BULK, .packetsize = 64},
+		}
+	};
+	struct usbp_interface_spec *ispec = &_ispec;
+#endif
+
+	DPRINTF(("%s  dev=%p sc=%p upftdi_if_methods=%p\n", __func__, dev,
 		sc,
-		&upftdi_methods));
+		&upftdi_if_methods));
 	
-	/* Set the device identification according to the function. */
-	usbp_devinfo_setup(dev, UDCLASS_IN_INTERFACE, 0, 0, USB_VENDOR_FTDI,
-	    USB_PRODUCT_FTDI_SERIAL_230X, UPFTDI_DEVICE_CODE, UPFTDI_VENDOR_STRING,
-	    UPFTDI_PRODUCT_STRING, UPFTDI_SERIAL_STRING);
-
-	/* Fill in the fields needed by the parent device. */
-	sc->sc_fun.dev = self;
-	sc->sc_fun.methods = &upftdi_methods;
-
-	/* timeout to start delayed transfers */
-//XXX	timeout_set(&sc->start_to, upftdi_start_timeout, sc);
-
-	/*
-	 * Build descriptors according to the device class specification.
-	 */
-	err = usbp_add_config(dev, &sc->sc_config);
-	if (err) {
-		printf(": usbp_add_config failed\n");
+	err = usbp_add_interface(dev, &sc->iface, &devdata, ispec,
+	    &upftdi_if_methods, NULL, 0);
+	if (err != USBD_NORMAL_COMPLETION) {
+		printf("%s: usbp_add_interface failed (%d)\n",
+		    __func__, err);
 		return;
 	}
 
-	for (idx=0; idx < n_comdevs; ++idx) {
-		struct usbp_interface *iface;
-		struct usbd_endpoint *ep_in, *ep_out;
+	sc->iface.usbd.priv = sc;
+	sc->sc_dev = self;
+	sc->sc_ncomdevs_requested = n_comdevs;
 
-		err = usbp_add_interface(sc->sc_config, UICLASS_VENDOR,
-		    UICLASS_VENDOR, 0, NULL, &iface);
-		if (err) {
-			printf(": usbp_add_interface failed\n");
-			break;
-		}
-		/* XXX don't use hard-coded values 128 and 16. */
-		err = usbp_add_endpoint(iface, UE_DIR_IN | 1, UE_BULK,         //XXX
-		    64, 16, &ep_in) ||
-		    usbp_add_endpoint(iface, UE_DIR_OUT | 2, UE_BULK,          //XXX
-			64, 16, &ep_out);
-		if (err) {
-			printf(": usbf_add_endpoint failed\n");
-			break;
-		}
-
-
-		sc->sc_comdev[idx].iface = iface;
-		sc->sc_comdev[idx].ep_in = ep_in;
-		sc->sc_comdev[idx].ep_out = ep_out;
-		sc->sc_comdev[idx].softc = sc;
-
-	}
-	n_comdevs = idx;
-
-#if 0
-	usb_cdc_union_descriptor_t udesc;
-	/* Append a CDC union descriptor. */
-	bzero(&udesc, sizeof udesc);
-	udesc.bLength = sizeof udesc;
-	udesc.bDescriptorType = UDESC_CS_INTERFACE;
-	udesc.bDescriptorSubtype = UDESCSUB_CDC_UNION;
-	udesc.bSlaveInterface[0] = usbf_interface_number(sc->sc_iface);
-	err = usbf_add_config_desc(sc->sc_config,
-	    (usb_descriptor_t *)&udesc, NULL);
-	if (err) {
-		printf(": usbf_add_config_desc failed\n");
-		return;
-	}
-#endif
-
-	/*
-	 * Close the configuration and build permanent descriptors.
-	 */
-	err = usbp_end_config(sc->sc_config);
-	if (err) {
-		printf(": usbf_end_config failed\n");
-		return;
-	}
-
-	sc->sc_ncomdevs = 0;
-
-	for (idx=0; idx < n_comdevs; ++idx) {
-		struct upftdi_comdev *com;
-
-		com = &sc->sc_comdev[idx];
-		/* Preallocate xfers and data buffers. */
-		com->xfer_in = usbp_alloc_xfer(dev);
-		com->xfer_out = usbp_alloc_xfer(dev);
-
-
-		com->buffer_in = usbd_alloc_buffer(com->xfer_in, UPFTDI_BUFSZ);
-		com->buffer_out = usbd_alloc_buffer(com->xfer_out, UPFTDI_BUFSZ);
-		if (com->buffer_in == NULL || com->buffer_out == NULL) {
-			printf(": usbf_alloc_buffer failed\n");
-			break;
-		}
-
-#if 0
-		/* Open the bulk pipes. */
-		err = usbp_open_pipe(com->iface,
-		    usbd_endpoint_address(com->ep_out), &com->pipe_out) ||
-		    usbp_open_pipe(com->iface,
-			usbd_endpoint_address(com->ep_in), &com->pipe_in);
-		if (err) {
-			printf(": usbf_open_pipe failed\n");
-			return;
-		}
-#endif
-
-		upftdi_attach_ucom(self, dev, idx);
-
-#if 0
-		/* Get ready to receive packets. */
-		usbd_setup_xfer(com->xfer_out, com->pipe_out, com,
-		    com->buffer_out, UPFTDI_BUFSZ, USBD_SHORT_XFER_OK, 0, upftdi_rxeof);
-		err = usbd_transfer(com->xfer_out);
-		if (err && err != USBD_IN_PROGRESS) {
-			printf(": usbf_transfer failed err=%d\n", err);
-
-#if 0			/* FixME: this crashes the kernel */
-			config_detach(com->ucomdev, DETACH_FORCE);
-#endif
-			/* XXX: release other resources */
-			break;
-		}
-#endif
-		
-		++sc->sc_ncomdevs;
-	}
-
-#if 0
-	s = splnet();
-
-
-	splx(s);
-#endif
+	
 }
 
 
 static void
-upftdi_attach_ucom(device_t self, struct usbp_device *dev, int idx)
+upftdi_attach_ucom(device_t self, struct usbp_device *udev, int idx,
+    struct usbd_endpoint *bulk_in,
+    struct usbd_endpoint *bulk_out)
 {
 	struct ucom_attach_args uca;
 	struct upftdi_softc *sc = device_private(self);
 
+	printf("%s: bulkin=%p,0x%x buldout=%p,0x%x\n",
+	    __func__,
+	    bulk_in, usbd_endpoint_address(bulk_in),
+	    bulk_out, usbd_endpoint_address(bulk_out));
+	
 	memset(&uca, 0, sizeof uca);
 	uca.portno = FTDI_PIT_SIOA + idx;
 	/* bulkin, bulkout set above */
@@ -323,10 +266,12 @@ upftdi_attach_ucom(device_t self, struct usbp_device *dev, int idx)
 	uca.ibufsizepad = uca.ibufsize;
 	uca.obufsize = UFTDIOBUFSIZE;
 	uca.opkthdrlen = 0; // sc->sc_hdrlen;
-	uca.device = (struct usbd_device *)dev;
-	uca.iface =  (struct usbd_interface *)sc->sc_comdev[idx].iface;
-	uca.bulkin = usbd_endpoint_address(sc->sc_comdev[idx].ep_in);
-	uca.bulkout = usbd_endpoint_address(sc->sc_comdev[idx].ep_out);
+	uca.device = (struct usbd_device *)udev;
+	uca.iface =  &sc->iface.usbd;
+	/* we give bulk_in and bulk_out inside-out here.
+	   because OUT is host-to-device, and it is input for us */
+	uca.bulkin = usbd_endpoint_address(bulk_out);
+	uca.bulkout = usbd_endpoint_address(bulk_in);
 	uca.methods = &upftdi_ucom_methods;
 	uca.arg = self;
 	uca.info = NULL;
@@ -338,7 +283,7 @@ upftdi_attach_ucom(device_t self, struct usbp_device *dev, int idx)
 }
 
 static usbd_status
-upftdi_req_reset(struct usbp_function *fun, usb_device_request_t *req)
+upftdi_req_reset(struct usbp_interface *iface, usb_device_request_t *req)
 {
 	int portno = UGETW(req->wIndex);
 
@@ -348,7 +293,7 @@ upftdi_req_reset(struct usbp_function *fun, usb_device_request_t *req)
 }
 
 static usbd_status
-upftdi_req_flow(struct usbp_function *fun, usb_device_request_t *req)
+upftdi_req_flow(struct usbp_interface *iface, usb_device_request_t *req)
 {
 	printf("%s: wIndex=%x\n", __func__,
 	    UGETW(req->wIndex));
@@ -356,7 +301,7 @@ upftdi_req_flow(struct usbp_function *fun, usb_device_request_t *req)
 }
 
 static usbd_status
-upftdi_req_bitmode(struct usbp_function *fun, usb_device_request_t *req)
+upftdi_req_bitmode(struct usbp_interface *iface, usb_device_request_t *req)
 {
 	printf("%s: portno=%d mode=%x\n", __func__,
 	    UGETW(req->wIndex),
@@ -366,7 +311,7 @@ upftdi_req_bitmode(struct usbp_function *fun, usb_device_request_t *req)
 }
 
 static usbd_status
-upftdi_req_baudrate(struct usbp_function *fun, usb_device_request_t *req)
+upftdi_req_baudrate(struct usbp_interface *iface, usb_device_request_t *req)
 {
 	printf("%s: portno=%d rate=%x\n", __func__,
 	    UGETW(req->wIndex),
@@ -376,7 +321,7 @@ upftdi_req_baudrate(struct usbp_function *fun, usb_device_request_t *req)
 }
 
 static usbd_status
-upftdi_req_setdata(struct usbp_function *fun, usb_device_request_t *req)
+upftdi_req_setdata(struct usbp_interface *iface, usb_device_request_t *req)
 {
 	printf("%s: portno=%d data=%x\n", __func__,
 	    UGETW(req->wIndex),
@@ -386,7 +331,7 @@ upftdi_req_setdata(struct usbp_function *fun, usb_device_request_t *req)
 }
 
 static usbd_status
-upftdi_req_modemctrl(struct usbp_function *fun, usb_device_request_t *req)
+upftdi_req_modemctrl(struct usbp_interface *iface, usb_device_request_t *req)
 {
 	printf("%s: portno=%d ctrl=%x\n", __func__,
 	    UGETW(req->wIndex),
@@ -396,27 +341,27 @@ upftdi_req_modemctrl(struct usbp_function *fun, usb_device_request_t *req)
 }
 
 static usbd_status
-upftdi_do_vendor_write(struct usbp_function *fun, usb_device_request_t *req, void **data)
+upftdi_do_vendor_write(struct usbp_interface *iface, usb_device_request_t *req, void **data)
 {
 	usbd_status err = USBD_STALLED;
 	
 	switch(req->bRequest) {
 	case FTDI_SIO_RESET:
-		 err = upftdi_req_reset(fun, req);
+		 err = upftdi_req_reset(iface, req);
 		 break;
 	case FTDI_SIO_SET_FLOW_CTRL:
-		err = upftdi_req_flow(fun, req);
+		err = upftdi_req_flow(iface, req);
 	case FTDI_SIO_SET_BITMODE:
-		err = upftdi_req_bitmode(fun, req);
+		err = upftdi_req_bitmode(iface, req);
 		break;
 	case FTDI_SIO_SET_BAUD_RATE:
-		err = upftdi_req_baudrate(fun, req);
+		err = upftdi_req_baudrate(iface, req);
 		break;
 	case FTDI_SIO_SET_DATA:
-		err = upftdi_req_setdata(fun, req);
+		err = upftdi_req_setdata(iface, req);
 		break;
 	case FTDI_SIO_MODEM_CTRL:
-		err = upftdi_req_modemctrl(fun, req);
+		err = upftdi_req_modemctrl(iface, req);
 		break;
 	default:
 		printf("%s: unknown request 0x%x\n", __func__, req->bRequest);
@@ -424,9 +369,9 @@ upftdi_do_vendor_write(struct usbp_function *fun, usb_device_request_t *req, voi
 	}
 
 	if (err == USBD_NORMAL_COMPLETION) {
-		static uint16_t v = 0;
+		static uint16_t zero = 0;
 		USETW(req->wLength, 2);
-		*data = (void *)&v;
+		*data = (void *)&zero;
 		return err;
 	}
 
@@ -437,16 +382,18 @@ upftdi_do_vendor_write(struct usbp_function *fun, usb_device_request_t *req, voi
  * Handle non-standard request received on the control pipe.
  */
 static usbd_status
-upftdi_do_request(struct usbp_function *fun, usb_device_request_t *req, void **data)
+upftdi_do_request(struct usbp_interface *iface, usb_device_request_t *req, void **data)
 {
-#define C(x,y) ((x) | ((y) << 8))
-	if (req->bmRequestType == UT_WRITE_VENDOR_DEVICE)
-		return upftdi_do_vendor_write(fun, req, data);
-
-	printf("requestType=%x request=%x\n",
+	printf("%s: requestType=%x request=%x\n",
+	    __func__,
 	    req->bmRequestType,
 	    req->bRequest);
-	return USBD_STALLED;
+
+#define C(x,y) ((x) | ((y) << 8))
+	if (req->bmRequestType == UT_WRITE_VENDOR_DEVICE)
+		return upftdi_do_vendor_write(iface, req, data);
+
+	return USBD_NOT_FOR_US;
 
 #undef C
 }
@@ -507,13 +454,14 @@ done:
 #endif
 
 
+#if 0
 static usbd_status
 upftdi_set_config(struct usbp_function *fun, struct usbp_config *config)
 {
 	DPRINTF(("%s: fun=%p\n", __func__, fun));
 	return USBD_NORMAL_COMPLETION;
 }
-
+#endif
 
 
 #if 0
@@ -559,55 +507,108 @@ upftdi_open(void *vsc, int portno)
 }
 #endif
 
-static void
-upftdi_read(void *vsc, int portno, u_char **ptr, u_int32_t *count)
-{
-	struct upftdi_softc *sc = vsc;
-//	u_char msr, lsr;
-
-	DPRINTFN(15,("uftdi_read: sc=%p, port=%d count=%d\n", sc, portno,
-		     *count));
-
-#if 0
-	msr = FTDI_GET_MSR(*ptr);
-	lsr = FTDI_GET_LSR(*ptr);
-
-#ifdef UFTDI_DEBUG
-	if (*count != 2)
-		DPRINTFN(10,("uftdi_read: sc=%p, port=%d count=%d data[0]="
-			    "0x%02x\n", sc, portno, *count, (*ptr)[2]));
-#endif
-
-	if (sc->sc_msr != msr ||
-	    (sc->sc_lsr & FTDI_LSR_MASK) != (lsr & FTDI_LSR_MASK)) {
-		DPRINTF(("uftdi_read: status change msr=0x%02x(0x%02x) "
-			 "lsr=0x%02x(0x%02x)\n", msr, sc->sc_msr,
-			 lsr, sc->sc_lsr));
-		sc->sc_msr = msr;
-		sc->sc_lsr = lsr;
-		ucom_status_change(device_private(sc->sc_subdev[portno-1]));
-	}
-
-	/* Adjust buffer pointer to skip status prefix */
-	*ptr += 2;
-
-#endif
-}
-
-static void
+Static void
 upftdi_write(void *vsc, int portno, u_char *to, u_char *from, u_int32_t *count)
 {
-//	struct uftdi_softc *sc = vsc;
+//	struct upftdi_softc *sc = vsc;
 
 	DPRINTFN(10,("uftdi_write: sc=%p, port=%d count=%u data[0]=0x%02x\n",
 		     vsc, portno, *count, from[0]));
 
-#if 0
-	/* Make length tag and copy data */
-	if (sc->sc_hdrlen > 0)
-		*to = FTDI_OUT_TAG(*count, portno);
+	
+	/* XXX: RSLD, RI, DSR, CTS, portno */
+	to[0] = portno;
+	to[1] = 0x60;	/* XXX: LSR */
 
-	memcpy(to + sc->sc_hdrlen, from, *count);
-	*count += sc->sc_hdrlen;
-#endif
+	memcpy(to + 2, from, *count);
+	*count += 2;
 }
+
+
+static usbd_status
+upftdi_configured(struct usbp_interface *iface)
+{
+	int idx;
+	struct upftdi_softc *sc = iface->usbd.priv;
+	struct usbp_device *udev = (struct usbp_device *)iface->usbd.device;
+	int n_comdevs = MIN(sc->sc_ncomdevs_requested,
+	    iface->usbd.idesc->bNumEndpoints / 2);
+	
+	sc->sc_ncomdevs_active = 0;
+
+	for (idx=0; idx < n_comdevs; ++idx) {
+#if 0
+		struct upftdi_comdev *com;
+
+		com = &sc->sc_comdev[idx];
+		/* Preallocate xfers and data buffers. */
+		com->xfer_in = usbp_alloc_xfer(dev);
+		com->xfer_out = usbp_alloc_xfer(dev);
+
+
+		com->buffer_in = usbd_alloc_buffer(com->xfer_in, UPFTDI_BUFSZ);
+		com->buffer_out = usbd_alloc_buffer(com->xfer_out, UPFTDI_BUFSZ);
+		if (com->buffer_in == NULL || com->buffer_out == NULL) {
+			printf(": usbf_alloc_buffer failed\n");
+			break;
+		}
+
+		/* Open the bulk pipes. */
+		err = usbp_open_pipe(com->iface,
+		    usbd_endpoint_address(com->ep_out), &com->pipe_out) ||
+		    usbp_open_pipe(com->iface,
+			usbd_endpoint_address(com->ep_in), &com->pipe_in);
+		if (err) {
+			printf(": usbf_open_pipe failed\n");
+			return;
+		}
+#endif
+
+		upftdi_attach_ucom(sc->sc_dev, udev, idx,
+		    &iface->usbd.endpoints[idx * 2],
+		    &iface->usbd.endpoints[idx * 2 + 1]);
+
+#if 0
+		/* Get ready to receive packets. */
+		usbd_setup_xfer(com->xfer_out, com->pipe_out, com,
+		    com->buffer_out, UPFTDI_BUFSZ, USBD_SHORT_XFER_OK, 0, upftdi_rxeof);
+		err = usbd_transfer(com->xfer_out);
+		if (err && err != USBD_IN_PROGRESS) {
+			printf(": usbf_transfer failed err=%d\n", err);
+
+#if 0			/* FixME: this crashes the kernel */
+			config_detach(com->ucomdev, DETACH_FORCE);
+#endif
+			/* XXX: release other resources */
+			break;
+		}
+#endif
+		
+		++sc->sc_ncomdevs_active;
+	}
+
+#if 0
+	s = splnet();
+
+
+	splx(s);
+#endif
+
+	return USBD_NORMAL_COMPLETION;
+}
+
+static usbd_status
+upftdi_unconfigured(struct usbp_interface *iface)
+{
+	return USBD_NORMAL_COMPLETION;
+}
+
+
+#if 0
+void test(struct upftdi_softc *sc);
+void
+test(struct upftdi_softc *sc)
+{
+	usbp_delete_interface(NULL, &sc->iface);
+}
+#endif

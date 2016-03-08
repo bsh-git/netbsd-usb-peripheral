@@ -92,16 +92,6 @@ struct usbp_port {
 	struct usbd_port usbd;
 };
 
-#if 0
-struct usbp_config {
-	struct usbp_device *uc_device;
-	usb_config_descriptor_t *uc_cdesc;
-	size_t uc_cdesc_size;
-	int uc_closed;
-	SIMPLEQ_ENTRY(usbp_config) next;
-};
-#endif
-
 #define USBP_EMPTY_STRING_ID		(USB_LANGUAGE_TABLE+1)
 #define USBP_STRING_ID_MIN		(USB_LANGUAGE_TABLE+2)
 #define USBP_STRING_ID_MAX		255
@@ -123,7 +113,7 @@ struct usbp_device {
 	usb_device_request_t	 def_req;	/* device request buffer */
 
 //	struct usbp_config *config;
-	struct usbp_function *function;	// XXX remove this
+//	struct usbp_function *function;	// XXX remove this
 
 	enum USBP_DEVICE_STATE {
 		USBP_DEV_INIT,
@@ -138,6 +128,7 @@ struct usbp_device {
 	int	n_interfaces;
 	SIMPLEQ_HEAD(, usbp_interface)  interface_list;
 
+	/* USB interfaces actually configured in this device. */
 	int n_picked_interfaces;
 	struct usbp_interface **picked_interfaces;
 
@@ -201,7 +192,7 @@ static void usbp_setup_default_xfer(struct usbd_xfer *xfer, struct usbd_pipe *pi
 				    u_int32_t timeout, usbd_callback callback);
 static void usbp_do_request(struct usbd_xfer *xfer, void *priv, usbd_status err);
 static usbd_status usbp_transfer(struct usbd_xfer *xfer);
-static usbd_status usbp_probe_and_attach(struct device *parent, struct usbp_device *dev/*, int port*/);
+static usbd_status usbp_search_interfaces(struct device *parent, struct usbp_device *dev/*, int port*/);
 static void usbp_remove_device(struct usbp_device *dev/*, struct usbp_port *up*/);
 //static void usbp_free_xfer(struct usbd_xfer *xfer);
 static void usbp_close_pipe(struct usbd_pipe *pipe);
@@ -212,6 +203,7 @@ static usbd_status usbp_set_config(struct usbp_device *dev, u_int8_t new);
 static void assemble_attached_interfaces(device_t);
 static usbd_status reassemble_interfaces(struct usbp_device *);
 static const usb_string_descriptor_t *get_string_descriptor(struct usbp_device *, int);
+static usbd_status pass_request_to_iface(struct usbp_device *, usb_device_request_t *, void **);
 
 usb_config_descriptor_t *usbp_config_descriptor(struct usbp_device *dev, u_int8_t index);
 
@@ -504,6 +496,8 @@ build_device_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 /*
  * build configuration descriptor which consists of interface
  * descriptors and endpoint descriptors.
+ *
+ * also, fixup the interface.
  */
 static usbd_status
 build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, int n_if)
@@ -586,7 +580,7 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 			USETW(ed->wMaxPacketSize, ifa[i].epspec[j].packetsize);
 
 			ep->edesc = ed;
-			ep->refcnt = 1;
+			ep->refcnt = 0;
 			ep->datatoggle = 0;
 			
 			printf("%s: interface=%p endpoitns=%p endpoint[%d]=0x%x (%p)\n",
@@ -603,7 +597,12 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 
 		if (iface->methods->fixup_idesc)
 			iface->methods->fixup_idesc(iface, id);
+
+		iface->usbd.idesc = id;
+		printf("%s: interface=%p idesc=%p numEndpoints=%d\n",
+		    __func__, iface, id, id->bNumEndpoints);
 	}
+
 
 	return USBD_NORMAL_COMPLETION;
 }
@@ -866,7 +865,7 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 	
 
 	/* Attach interface drivers. */
-	err = usbp_probe_and_attach(parent, dev /* , port*/);
+	err = usbp_search_interfaces(parent, dev /* , port*/);
 	if (err) {
 		DPRINTF(0, ("%s: %s: usbf_probe_and_attach failed. err=%d\n",
 			     device_xname(parent),
@@ -1276,6 +1275,9 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 	u_int16_t index;
 	struct usbp_bus *bus = (struct usbp_bus *)(dev->usbd.bus);
 
+	DPRINTF(9, ("%s: xfer=%p ep0state=%d  bRequest=0x%x bmRequestType=0x%x\n",
+		__func__, xfer, bus->ep0state, req->bRequest, req->bmRequestType));
+
 	/* XXX */
 	if (bus->ep0state == EP0_END_XFER &&
 	    err == USBD_SHORT_XFER) {
@@ -1360,38 +1362,20 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 		break;
 	}
 
-	default: {
-		struct usbp_function *fun = dev->function;
-		
-		DPRINTF(5,("usbf_do_request: xfer=%p dev=%p, fun=%p methods=%p %p %p\n",
-			   xfer,
-			   dev,
-			   fun, fun->methods,
-			   fun->methods ? fun->methods->set_config : NULL,
-			   fun->methods ? fun->methods->do_request : NULL));
-
-		if (fun == NULL)
-			err = USBD_STALLED;
-		else {
-			/* XXX change prototype for this method to remove
-			 * XXX the data argument. */
-			DPRINTF(0, ("calling do_request %p\n", fun->methods->do_request));
-			err = fun->methods->do_request(fun, req, &data);
-			DPRINTF(0, ("return from do_request err=%d\n", err));
-		}
-	}
+	default:
+		err = pass_request_to_iface(dev, req, &data);
 	}
 
-	DPRINTF(5,("usbf_do_request: %d err=%d wLength=%d\n", __LINE__, err, UGETW(req->wLength)));
+	DPRINTF(5,("usbp_do_request: %d err=%d wLength=%d\n", __LINE__, err, UGETW(req->wLength)));
 
 	if (err) {
-		DPRINTF(0,("usbf_do_request: request=%#x, type=%#x "
+		DPRINTF(0,("usbp_do_request: request=%#x, type=%#x "
 		    "failed, %s\n", req->bRequest, req->bmRequestType,
 		    usbd_errstr(err)));
 		usbp_stall_pipe(dev->usbd.default_pipe);
 	} else if (UGETW(req->wLength) > 0) {
 		if (data == NULL) {
-			DPRINTF(0,("usbf_do_request: no data, "
+			DPRINTF(0,("usbp_do_request: no data, "
 			    "sending ZLP\n"));
 			USETW(req->wLength, 0);
 		}
@@ -1401,7 +1385,7 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 		    NULL, data, UGETW(req->wLength), 0, 0, NULL);
 		err = usbp_transfer(dev->data_xfer);
 		if (err && err != USBD_IN_PROGRESS) {
-			DPRINTF(0,("usbf_do_request: data xfer=%p, %s\n",
+			DPRINTF(0,("usbp_do_request: data xfer=%p, %s\n",
 			    xfer, usbd_errstr(err)));
 		}
 	}
@@ -1412,13 +1396,39 @@ next:
 	    NULL, &dev->def_req, 0, 0, usbp_do_request);
 	err = usbp_transfer(dev->default_xfer);
 	if (err && err != USBD_IN_PROGRESS) {
-		DPRINTF(0,("usbf_do_request: ctrl xfer=%p, %s\n", xfer,
+		DPRINTF(0,("usbp_do_request: ctrl xfer=%p, %s\n", xfer,
 		    usbd_errstr(err)));
 	}
 
-	DPRINTF(5,("usbf_do_request: done\n"));
+	DPRINTF(5,("usbp_do_request: done\n"));
 }
 
+
+static usbd_status
+pass_request_to_iface(struct usbp_device *dev, usb_device_request_t *req, void **data)
+{
+	int i;
+	usbd_status err = USBD_STALLED;
+	struct usbp_interface *iface;
+
+	DPRINTF(5, ("%s: picked_interfaces=%d\n", __func__, dev->n_picked_interfaces));
+	for (i=0; i < dev->n_picked_interfaces; ++i) {
+		iface = dev->picked_interfaces[i];
+
+		DPRINTF(5, ("%s: iface=%p handler=%p\n", __func__,
+			iface, iface->methods->handle_device_request));
+
+		if (iface->methods->handle_device_request == NULL)
+			continue;
+		err = iface->methods->handle_device_request(iface, req, data);
+
+		if (err != USBD_NOT_FOR_US)
+			return err;
+	}
+
+	/* no interface can handle the request */
+	return USBD_STALLED;
+}
 
 static usbd_status
 usbp_transfer(struct usbd_xfer *xfer)
@@ -1439,43 +1449,25 @@ usbp_transfer(struct usbd_xfer *xfer)
 
 
 /*
- * Attach a function driver.
+ * Attach USB interface drivers.
  */
 static usbd_status
-usbp_probe_and_attach(struct device *parent, struct usbp_device *dev/*, int port*/)
+usbp_search_interfaces(struct device *parent, struct usbp_device *dev/*, int port*/)
 {
 	struct usbp_interface_attach_args uaa;
 	cfdata_t cfdata;
 
-	KASSERT(dev->function == NULL);
-
 	bzero(&uaa, sizeof uaa);
 	uaa.device = dev;
 
-#if 0
 	/*
-	 * The softc structure of a USB function driver must begin with a
-	 * "struct usbf_function" member (instead of USBBASEDEV), which must
-	 * be initialized in the function driver's attach routine.  Also, it
-	 * should use usbf_devinfo_setup() to set the device identification.
+	 * find all USB interface drivers attached to this device.
 	 */
-	dv = config_found(parent, &uaa, NULL);
-	if (dv != NULL) {
-		dev->function = (struct usbp_function *)device_private(dv);
-		return USBD_NORMAL_COMPLETION;
-	}
-#else
 	while ((cfdata = config_search_ia(NULL, parent, "usbp", &uaa)) != NULL) {
 		printf("%s: cfdata=%p\n", __func__, cfdata);
 		config_attach(parent, cfdata, &uaa, NULL);
 	}
-#endif
 
-	/*
-	 * We failed to attach a function driver for this device, but the
-	 * device can still function as a generic USB device without any
-	 * interfaces.
-	 */
 	return USBD_NORMAL_COMPLETION;
 }
 
@@ -1484,8 +1476,8 @@ usbp_remove_device(struct usbp_device *dev/*, struct usbp_port *up*/)
 {
 	KASSERT(dev != NULL /*&& dev == up->device*/);
 
-	if (dev->function != NULL)
-		config_detach((struct device *)dev->function, DETACH_FORCE);
+//	if (dev->function != NULL)
+//		config_detach((struct device *)dev->function, DETACH_FORCE);
 	if (dev->usbd.default_pipe != NULL)
 		usbp_close_pipe(dev->usbd.default_pipe);
 #if 0

@@ -79,7 +79,7 @@ struct usbp_interface_methods {
 	usbd_status (* configured)(struct usbp_interface *);
 	usbd_status (* unconfigured)(struct usbp_interface *);
 	usbd_status (* handle_device_request)(
-		struct usbp_interface *);
+		struct usbp_interface *, usb_device_request_t *, void **);
 	usbd_status (* fixup_idesc)(
 		struct usbp_interface *, usb_interface_descriptor_t *);
 };
