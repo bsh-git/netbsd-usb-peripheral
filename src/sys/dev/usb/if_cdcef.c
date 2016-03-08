@@ -116,7 +116,9 @@ void		cdcef_start_timeout (void *);
 static int cdcef_init(struct ifnet *);
 static usbd_status cdcef_on_configured(struct usbp_interface *);
 static usbd_status cdcef_on_unconfigured(struct usbp_interface *);
+#ifndef	CDCEF_NO_UNION_DESC
 static usbd_status cdcef_fixup_idesc(struct usbp_interface *, usb_interface_descriptor_t *);
+#endif
 
 
 CFATTACH_DECL_NEW(cdcef, sizeof (struct cdcef_softc),
@@ -131,7 +133,11 @@ static const struct usbp_interface_methods cdcef_if_methods = {
 	cdcef_on_configured,
 	cdcef_on_unconfigured,
 	NULL,
+#ifdef	CDCEF_NO_UNION_DESC
+	NULL
+#else
 	cdcef_fixup_idesc
+#endif
 };
 
 
@@ -186,12 +192,14 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 			{.address= UE_DIR_OUT | 0, .attributes = UE_BULK, .packetsize = 64},
 		}
 	};
+#ifdef	CDCEF_NO_UNION_DESC
 	static const usb_cdc_union_descriptor_t udesc = {
 		.bLength = sizeof udesc,
 		.bDescriptorType = UDESC_CS_INTERFACE,
 		.bDescriptorSubtype = UDESCSUB_CDC_UNION,
 		.bSlaveInterface[0] = 1  // should be replaced with real interface number.
 	};
+#endif
 
 	DPRINTF(10, ("%s\n", __func__));
 
@@ -201,7 +209,13 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 
 	err = usbp_add_interface(dev, &sc->sc_iface, &devdata,
 				 &ispec, &cdcef_if_methods,
-				 &udesc, sizeof udesc);
+#ifndef	CDCEF_NO_UNION_DESC
+				 NULL, 0
+#else
+				 &udesc, sizeof udesc
+#endif
+
+		);
 	if (err != USBD_NORMAL_COMPLETION) {
 		aprint_error_dev(self, "usbp_add_interface failed (%d)\n", err);
 		return;
@@ -681,6 +695,7 @@ cdcef_stop(struct cdcef_softc *sc)
 	}
 }
 
+#ifndef	CDCEF_NO_UNION_DESC
 static usbd_status
 cdcef_fixup_idesc(struct usbp_interface *iface, usb_interface_descriptor_t *idesc)
 {
@@ -693,3 +708,4 @@ cdcef_fixup_idesc(struct usbp_interface *iface, usb_interface_descriptor_t *ides
 	udesc->bSlaveInterface[0] = iface_number;
 	return USBD_NORMAL_COMPLETION;
 }
+#endif
