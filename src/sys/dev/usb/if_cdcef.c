@@ -67,7 +67,6 @@
 struct cdcef_softc {
 	device_t	sc_dev;
 	struct usbp_interface   sc_iface;
-//	struct usbp_config	*sc_config;
 	struct usbd_endpoint	*sc_ep_in;
 	struct usbd_endpoint	*sc_ep_out;
 	struct usbd_pipe	*sc_pipe_in;
@@ -96,6 +95,7 @@ struct cdcef_softc {
 
 int		cdcef_match(device_t, cfdata_t, void *);
 void		cdcef_attach(device_t, device_t, void *);
+int		cdcef_detach(device_t, int);
 
 void		cdcef_start(struct ifnet *);
 
@@ -119,7 +119,7 @@ static usbd_status cdcef_fixup_idesc(struct usbp_interface *, usb_interface_desc
 
 
 CFATTACH_DECL_NEW(cdcef, sizeof (struct cdcef_softc),
-    cdcef_match, cdcef_attach, NULL, NULL);
+    cdcef_match, cdcef_attach, cdcef_detach, NULL);
 
 static const struct usbp_interface_methods cdcef_if_methods = {
 	cdcef_on_configured,
@@ -696,3 +696,38 @@ cdcef_fixup_idesc(struct usbp_interface *iface, usb_interface_descriptor_t *ides
 	return USBD_NORMAL_COMPLETION;
 }
 #endif
+
+
+
+int
+cdcef_detach(device_t self, int flag)
+{
+	int s;
+	struct cdcef_softc *sc = device_private(self);
+	struct ifnet	*ifp = GET_IFP(sc);
+
+	s = splusb();
+#if 0
+	if (!sc->cdce_attached) {
+		splx(s);
+		return 0;
+	}
+#endif
+
+	if (ifp->if_flags & IFF_RUNNING)
+		cdcef_stop(sc);
+
+	ether_ifdetach(ifp);
+
+	if_detach(ifp);
+
+	// sc->cdce_attached = 0;
+
+	(void)usbp_delete_interface(&sc->sc_iface);
+	
+	splx(s);
+
+	return 0;
+}
+
+

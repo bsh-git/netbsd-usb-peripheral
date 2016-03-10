@@ -10,7 +10,6 @@
 #ifndef _USBP_H
 #define _USBP_H
 
-struct usbp_config;
 struct usbp_interface;
 struct usbp_endpoint;
 struct usbp_bus;
@@ -49,6 +48,7 @@ struct usbp_bus {
 	struct usbp_device *device;	/* USB device we are acting */
 	struct usbp_bus_methods *usbp_methods;	/* additional bus methods for
 						   peripheral-side*/
+
 };
 
 
@@ -172,7 +172,7 @@ usbd_status usbp_add_interface(struct usbp_device *,
     const void *additional_interface_descriptor,
     size_t additional_interface_descriptor_size);
     
-usbd_status usbp_delete_interface(struct usbp_device *, struct usbp_interface *);
+usbd_status usbp_delete_interface(struct usbp_interface *);
     
 
 #endif	/* _USBP_H */

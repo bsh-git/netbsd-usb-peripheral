@@ -113,7 +113,9 @@ struct usbp_device {
 
 	enum USBP_DEVICE_STATE {
 		USBP_DEV_INIT,
+		USBP_DEV_NO_INTERFACE,	/* no interfaces attached */
 		USBP_DEV_ASSEMBLED,	/* has interfaces, not connected to a host */
+		USBP_DEV_READY,	        /* waiting for host to connect */
 		USBP_DEV_CONNECTED,
 		USBP_DEV_ADDRESS,	/* after set address */
 		USBP_DEV_CONFIGURED
@@ -136,6 +138,8 @@ struct usbp_device {
 	size_t			 sdesc_size;	/* size of ud_sdesc */
 	/* scratch area to send string descriptor back to the host */
 	usb_string_descriptor_t	string_descriptor;
+
+
 };
 
 
@@ -161,7 +165,6 @@ struct usbp_softc {
 #endif
 	bool sc_dying;
 	u_int8_t		*sc_hs_config;
-
 };
 
 static const char *usbrev_str[] = USBREV_STR;
@@ -188,8 +191,9 @@ static void usbp_close_pipe(struct usbd_pipe *pipe);
 static void usbp_set_address(struct usbp_device *dev, u_int8_t address);
 static int usbp_match(device_t, cfdata_t, void *);
 static void usbp_attach(device_t, device_t, void *);
+static void usbp_child_detached(device_t, device_t);
 static usbd_status usbp_set_config(struct usbp_device *dev, u_int8_t new);
-static void assemble_attached_interfaces(device_t);
+static void start_usbp(device_t);
 static usbd_status reassemble_interfaces(struct usbp_device *);
 static const usb_string_descriptor_t *get_string_descriptor(struct usbp_device *, int);
 static usbd_status pass_request_to_iface(struct usbp_device *, usb_device_request_t *, void **);
@@ -200,7 +204,7 @@ usb_config_descriptor_t *usbp_config_descriptor(struct usbp_device *dev, u_int8_
 extern struct cfdriver usbf_cd;
 
 CFATTACH_DECL3_NEW(usbp, sizeof(struct usbp_softc),
-		   usbp_match, usbp_attach, NULL, NULL, NULL, NULL, 0);
+		   usbp_match, usbp_attach, NULL, NULL, NULL, usbp_child_detached, 0);
 
 
 #define	USBP_DEBUG_TRACE	(1<<0)
@@ -237,6 +241,9 @@ usbp_attach(device_t parent, device_t self, void *aux)
 	sc->sc_bus = uaa->bus;
 	sc->sc_bus->usbd.usbctl = self;
 	sc->sc_bus->usbd.pipe_size = sizeof (struct usbd_pipe);
+
+	sc->sc_bus->usbd.methods->get_lock(&sc->sc_bus->usbd,
+	    &sc->sc_bus->usbd.lock);
 
 	usbrev = sc->sc_bus->usbd.usbrev;
 	aprint_normal(": USB revision %s", usbrev_str[usbrev]);
@@ -278,7 +285,7 @@ usbp_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 
-	config_defer(self, assemble_attached_interfaces);
+	config_defer(self, start_usbp);
 #if 0
 	/* Create a process context for asynchronous tasks. */
 	if (kthread_create(PRI_NONE, 0, NULL, usbf_task_thread, sc,
@@ -291,12 +298,12 @@ usbp_attach(device_t parent, device_t self, void *aux)
 
 
 static void
-assemble_attached_interfaces(device_t self)
+start_usbp(device_t self)
 {
 	struct usbp_softc *sc = device_private(self);
 	struct usbp_device *dev = sc->sc_usbdev;
 
-	DPRINTF(USBP_DEBUG_TRACE, ("%s: configure interfaces\n", __func__));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s: assemble interfaces\n", __func__));
 	reassemble_interfaces(dev);
 
 }
@@ -346,10 +353,10 @@ select_interfaces(struct usbp_device *device, struct iface_assembly *ifa)
 			*ep = ispec->endpoints[i];
 			st = bus->usbp_methods->select_endpoint(bus, ep, tmpmap);
 			DPRINTF(USBP_DEBUG_CONTROLLER,
-			    ("client controller returned %d\n", st));
-			if (st != USBD_NORMAL_COMPLETION) {
+			    ("%s: client controller returned %d\n", __func__, st));
+			if (st) {
 				/* can't assing an endpoint.  This
-				 * interface is not configured in the
+				 * interface is not selected for the
 				 * device */
 				goto not_used;
 			}
@@ -423,6 +430,7 @@ build_device_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 	struct usbp_interface *iface;
 	struct usbp_bus *bus = (struct usbp_bus *)usbdev->usbd.bus;
 	int i;
+
 
 	/*
 	 * Initialize device descriptor.  The function driver for this
@@ -502,6 +510,8 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 	usb_config_descriptor_t *cd;
 	int i, j;
 
+	DPRINTF(USBP_DEBUG_TRACE, ("%s\n", __func__));
+
 	if (usbdev->cdesc) {
 		kmem_free(usbdev->cdesc, usbdev->cdesc_size);
 		usbdev->cdesc = NULL;
@@ -523,6 +533,8 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 	if (area == NULL)
 		return USBD_NOMEM;
 	usbdev->cdesc = cd = (usb_config_descriptor_t *)area;
+	usbdev->cdesc_size = total_size;
+
 	cd->bLength = USB_CONFIG_DESCRIPTOR_SIZE;
 	cd->bDescriptorType = UDESC_CONFIG;
 	
@@ -640,7 +652,9 @@ reassemble_interfaces(struct usbp_device *device)
 	n_new = select_interfaces(device, ifa);
 
 	DPRINTF(USBP_DEBUG_TRACE,
-	    ("%s: %d interface(s)\n", __func__, n_new));
+	    ("%s: number of active interface state=%d %d->%d\n", __func__,
+		device->dev_state,
+		device->n_picked_interfaces, n_new));
 	do {
 		int i, j;
 		for (i=0; i < n_new; ++i) {
@@ -654,7 +668,8 @@ reassemble_interfaces(struct usbp_device *device)
 	
 	if (!compare_interfaces(ifa, n_new, device->picked_interfaces,
 		device->n_picked_interfaces)) {
-		if (device->dev_state == USBP_DEV_CONNECTED) {
+		/* set of active interfaces has changed. */
+		if (device->dev_state >= USBP_DEV_READY) {
 			if (bus->usbp_methods->pullup_control)
 				bus->usbp_methods->pullup_control(bus, false);
 			
@@ -664,18 +679,25 @@ reassemble_interfaces(struct usbp_device *device)
 		if (device->dev_state != USBP_DEV_INIT &&
 		    device->n_picked_interfaces > 0) {
 			int i;
+			DPRINTF(USBP_DEBUG_TRACE,
+			    ("%s: unconfigure\n", __func__));
 			// unconfigure
 			for (i=0; i < device->n_picked_interfaces; ++i) {
 				deactivate_interface(device->picked_interfaces[i]);
 			}
 
 			kmem_free(device->picked_interfaces,
-			    sizeof (struct usbp_interface) * device->n_picked_interfaces);
+			    device->n_picked_interfaces	* sizeof device->picked_interfaces[0]);
 			device->picked_interfaces = NULL;
 			device->n_picked_interfaces = 0;
+			DPRINTF(USBP_DEBUG_TRACE,
+			    ("%s: unconfigure END\n", __func__));
 		}
 
-		if (n_new > 0) {
+		if (n_new <= 0) {
+			device->dev_state = USBP_DEV_NO_INTERFACE;
+		}
+		else {
 			int i;
 
 			build_device_descriptor(device, ifa, n_new);
@@ -683,7 +705,8 @@ reassemble_interfaces(struct usbp_device *device)
 			// configure
 
 			device->picked_interfaces =
-			    kmem_alloc(n_new * sizeof (struct usbp_interface), KM_NOSLEEP);
+			    kmem_alloc(n_new * sizeof device->picked_interfaces[0],
+				KM_NOSLEEP);
 
 			if (device->picked_interfaces == NULL)
 				return USBD_NOMEM;
@@ -694,22 +717,22 @@ reassemble_interfaces(struct usbp_device *device)
 				device->picked_interfaces[i] = iface;
 			}
 
-			device->n_picked_interfaces = n_new;
 			device->dev_state = USBP_DEV_ASSEMBLED;
-
 		}
+		device->n_picked_interfaces = n_new;
+
 	}
 
 	if (device->dev_state == USBP_DEV_ASSEMBLED &&
-	    (old_state >= USBP_DEV_CONNECTED ||
-		(is_vbus_on(bus) && device->connect_auto))) {
-		
+	    (old_state >= USBP_DEV_READY || device->connect_auto)) {
 		if (bus->usbp_methods->enable)
 			bus->usbp_methods->enable(bus, true);
 		if (bus->usbp_methods->pullup_control)
 			bus->usbp_methods->pullup_control(bus, true);
-			
-		device->dev_state = USBP_DEV_CONNECTED;
+		device->dev_state = USBP_DEV_READY;
+
+		if (is_vbus_on(bus)) 
+			device->dev_state = USBP_DEV_CONNECTED;
 	}
 
 	return USBD_NORMAL_COMPLETION;
@@ -1507,9 +1530,11 @@ usbd_endpoint_address(struct usbd_endpoint *endpoint)
 	return endpoint->edesc->bEndpointAddress;
 }
 
+#if 1
 /* Called at splusb() */
 void
 usbp_transfer_complete(struct usbd_xfer *xfer)
+
 {
 	struct usbd_pipe *pipe = xfer->pipe;
 	int repeat = pipe->repeat;
@@ -1553,6 +1578,7 @@ usbp_transfer_complete(struct usbd_xfer *xfer)
 	}
 }
 
+#endif
 
 usbd_status
 usbp_insert_transfer(struct usbd_xfer *xfer)
@@ -1828,7 +1854,7 @@ usbp_add_interface(struct usbp_device *dev,
 	}
 
 	iface->num_strings = 4;
-	iface->string = kmem_alloc(sizeof (struct usbp_string) * iface->num_strings, KM_SLEEP);
+	iface->string = kmem_alloc(sizeof (struct usbp_string *) * iface->num_strings, KM_SLEEP);
 	if (iface->string == NULL) {
 		kmem_free(__UNCONST(iface->ispec), ispec_size);
 		iface->ispec = NULL;
@@ -1866,11 +1892,23 @@ usbp_add_interface(struct usbp_device *dev,
 }
 
 usbd_status
-usbp_delete_interface(struct usbp_device *dev,
-    struct usbp_interface *iface)
+usbp_delete_interface(struct usbp_interface *iface)
 {
+	struct usbp_device *dev = usbp_interface_to_device(iface);
+	usbd_status err = USBD_NORMAL_COMPLETION;
 
+	KASSERT(dev != NULL);
+	
+	SIMPLEQ_REMOVE(&dev->interface_list, iface, usbp_interface, next);
+	dev->n_interfaces--;
 
+	if (dev->dev_state != USBP_DEV_INIT) {
+		// reconfigure
+		err = reassemble_interfaces(dev);
+		if (err != USBD_NORMAL_COMPLETION)
+			return err;
+	}
+		
 	if (iface->ispec) {
 		size_t ispec_size = sizeof *iface->ispec +
 		    iface->ispec->num_endpoints * sizeof (struct usbp_endpoint_request);
@@ -1882,6 +1920,8 @@ usbp_delete_interface(struct usbp_device *dev,
 	if (iface->string) {
 		int i;
 
+		DPRINTF(USBP_DEBUG_STRING,
+		    ("%s: relasing strings for iface\n", __func__));
 		for (i=0; i < iface->num_strings; ++i) {
 			if (iface->string[i]) {
 				usbp_release_string(dev, iface->string[i]);
@@ -1889,18 +1929,15 @@ usbp_delete_interface(struct usbp_device *dev,
 		}
 
 
-		kmem_free(iface->string, sizeof (struct usbp_string) * iface->num_strings);
+		DPRINTF(USBP_DEBUG_STRING,
+		    ("%s: free strings for iface\n", __func__));
+		kmem_free(iface->string, sizeof (struct usbp_string *) * iface->num_strings);
 		iface->string = NULL;
+		iface->num_strings = 0;
 	}
 
-	SIMPLEQ_REMOVE(&dev->interface_list, iface, usbp_interface, next);
-	dev->n_interfaces--;
-
-	if (dev->dev_state != USBP_DEV_INIT) {
-		// reconfigure
-	}
-		
-	return USBD_NORMAL_COMPLETION;
+	iface->usbd.device = NULL;
+	return err;
 }
 
 /*
@@ -2089,4 +2126,14 @@ usbp_init_interface(struct usbp_device *dev, struct usbp_interface *iface)
 {
 	memset(iface, 0, sizeof *iface);
 	iface->usbd.device = &dev->usbd;
+}
+
+static void
+usbp_child_detached(device_t self, device_t child)
+{
+	DPRINTF(USBP_DEBUG_TRACE, ("%s\n", __func__));
+
+	/* children call usbp_delete_interface by themselves.
+	   nothing to do here.
+	   this function is necessary for "drvctl -d" to work  */
 }
