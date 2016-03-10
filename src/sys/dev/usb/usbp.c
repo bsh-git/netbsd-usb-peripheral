@@ -203,11 +203,16 @@ CFATTACH_DECL3_NEW(usbp, sizeof(struct usbp_softc),
 		   usbp_match, usbp_attach, NULL, NULL, NULL, NULL, 0);
 
 
+#define	USBP_DEBUG_TRACE	(1<<0)
+#define	USBP_DEBUG_MISC 	(1<<1)
+#define	USBP_DEBUG_CONTROLLER 	(1<<4)
+#define	USBP_DEBUG_DESCRIPTOR	(1<<5)
+#define	USBP_DEBUG_STRING	(1<<8)
 #ifndef USBP_DEBUG
 #define DPRINTF(l, x)	do {} while (0)
 #else
-int usbpdebug = 10;
-#define DPRINTF(l, x)	if ((l) <= usbpdebug) printf x; else
+int usbpdebug = 0xffffffff;
+#define DPRINTF(l, x)	if ((l) & usbpdebug) printf x; else
 #endif
 
 static int
@@ -291,7 +296,7 @@ assemble_attached_interfaces(device_t self)
 	struct usbp_softc *sc = device_private(self);
 	struct usbp_device *dev = sc->sc_usbdev;
 
-	DPRINTF(0, ("%s: configure interfaces\n", __func__));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s: configure interfaces\n", __func__));
 	reassemble_interfaces(dev);
 
 }
@@ -340,7 +345,8 @@ select_interfaces(struct usbp_device *device, struct iface_assembly *ifa)
 			usbd_status st;
 			*ep = ispec->endpoints[i];
 			st = bus->usbp_methods->select_endpoint(bus, ep, tmpmap);
-			DPRINTF(0, ("client controller returned %d\n", st));
+			DPRINTF(USBP_DEBUG_CONTROLLER,
+			    ("client controller returned %d\n", st));
 			if (st != USBD_NORMAL_COMPLETION) {
 				/* can't assing an endpoint.  This
 				 * interface is not configured in the
@@ -510,7 +516,8 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 		    ifa[i].iface->ispec->num_endpoints;
 	}
 
-	DPRINTF(0, ("%s: config_descriptor_size=%zd\n", __func__, total_size));
+	DPRINTF(USBP_DEBUG_DESCRIPTOR,
+	    ("%s: config_descriptor_size=%zd\n", __func__, total_size));
 
 	area = kmem_alloc(total_size, KM_SLEEP);
 	if (area == NULL)
@@ -632,7 +639,8 @@ reassemble_interfaces(struct usbp_device *device)
 
 	n_new = select_interfaces(device, ifa);
 
-	DPRINTF(5, ("%s: %d interface(s)\n", __func__, n_new));
+	DPRINTF(USBP_DEBUG_TRACE,
+	    ("%s: %d interface(s)\n", __func__, n_new));
 	do {
 		int i, j;
 		for (i=0; i < n_new; ++i) {
@@ -736,7 +744,7 @@ usbp_host_reset(struct usbp_bus *bus)
 {
 	struct usbp_device *dev = bus->device;
 
-	DPRINTF(0,("%s\n", __func__));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s\n", __func__));
 
 	/* Change device state from any state backe to Default. */
 	(void)usbp_set_config(dev, USB_UNCONFIG_NO);
@@ -744,13 +752,13 @@ usbp_host_reset(struct usbp_bus *bus)
 
 	bus->ep0state = EP0_IDLE;
 
-	DPRINTF(0,("%s %d\n", __func__, __LINE__));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s %d\n", __func__, __LINE__));
 
 #if 0
 	SIMPLEQ_INIT(&dev->default_pipe);
 #else
 	while (!SIMPLEQ_EMPTY(&dev->usbd.default_pipe->queue)) {
-		DPRINTF(0, ("%s: dequeue xfer %p", __func__, SIMPLEQ_FIRST(&dev->usbd.default_pipe->queue)));
+		DPRINTF(USBP_DEBUG_TRACE, ("%s: dequeue xfer %p", __func__, SIMPLEQ_FIRST(&dev->usbd.default_pipe->queue)));
 		SIMPLEQ_REMOVE_HEAD(&dev->usbd.default_pipe->queue, next);
 	}
 #endif		
@@ -784,7 +792,8 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 #endif
 #endif
 
-	DPRINTF(0,("%s: %s: rev=%x\n", __func__, device_xname(parent), bus->usbd.usbrev));
+	DPRINTF(USBP_DEBUG_TRACE,
+	    ("%s: %s: rev=%x\n", __func__, device_xname(parent), bus->usbd.usbrev));
 
 	dev = malloc(sizeof(*dev), M_USB, M_NOWAIT | M_ZERO);
 	if (dev == NULL)
@@ -812,7 +821,8 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 	for (i=0; i < USBP_EMPTY_STRING_ID; ++i)
 		__BITMAP_SET(i, &dev->string_id_map);
 	dev->empty_string = usbp_intern_string(dev, "");
-	DPRINTF(5, ("%s: dev=%p empty_string=%p\n", __func__, dev, dev->empty_string));
+	DPRINTF(USBP_DEBUG_STRING,
+	    ("%s: dev=%p empty_string=%p\n", __func__, dev, dev->empty_string));
 
 	/* Initialize device status. */
 	USETW(dev->status.wStatus, UDS_SELF_POWERED);
@@ -862,7 +872,8 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 	/* Attach interface drivers. */
 	err = usbp_search_interfaces(parent, dev /* , port*/);
 	if (err) {
-		DPRINTF(0, ("%s: %s: usbf_probe_and_attach failed. err=%d\n",
+		/* doesn't happen for now */
+		DPRINTF(USBP_DEBUG_TRACE, ("%s: %s: usbp_search_interfaces failed. err=%d\n",
 			     device_xname(parent),
 			     __func__, err));
 		usbp_remove_device(dev/*, up*/);
@@ -919,7 +930,8 @@ usbp_iface_endpoint(struct usbp_interface *iface, int index)
 static void
 usbp_set_address(struct usbp_device *dev, u_int8_t address)
 {
-	DPRINTF(0,("usbf_set_address: dev=%p, %u -> %u\n", dev,
+	DPRINTF(USBP_DEBUG_TRACE,
+	    ("%s: dev=%p, %u -> %u\n", __func__, dev,
 	    dev->usbd.address, address));
 	dev->usbd.address = address;
 }
@@ -955,7 +967,7 @@ usbp_set_config(struct usbp_device *dev, u_int8_t new)
 	u_int8_t old = cfg ? cfg->uc_cdesc->bConfigurationValue :
 	    USB_UNCONFIG_NO;
 
-	DPRINTF(0,("%s: dev=%p, %u -> %u\n", __func__, dev, old, new));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s: dev=%p, %u -> %u\n", __func__, dev, old, new));
 
 	if (old == new)
 		return USBD_NORMAL_COMPLETION;
@@ -971,7 +983,8 @@ usbp_set_config(struct usbp_device *dev, u_int8_t new)
 		if (fun->methods->set_config)
 			err = fun->methods->set_config(fun, NULL);
 		if (err) {
-			DPRINTF(0,("usbp_set_config: %s\n", usbd_errstr(err)));
+			DPRINTF(USBP_DEBUG_TRACE,
+			    ("usbp_set_config: %s\n", usbd_errstr(err)));
 		}
 		dev->config = NULL;
 		return USBD_NORMAL_COMPLETION;
@@ -1076,7 +1089,8 @@ usbp_get_descriptor(struct usbp_device *dev, usb_device_request_t *req,
 		USETW(req->wLength, MIN(UGETW(req->wLength), sd->bLength));
 		return USBD_NORMAL_COMPLETION;
 	default:
-		DPRINTF(0,("usbf_get_descriptor: unknown descriptor type=%u\n",
+		DPRINTF(USBP_DEBUG_TRACE,
+		    ("usbf_get_descriptor: unknown descriptor type=%u\n",
 		    type));
 		return USBD_INVAL;
 	}
@@ -1131,7 +1145,7 @@ usbp_clear_endpoint_halt(struct usbd_endpoint *endpoint)
 static void
 usbp_stall_pipe(struct usbd_pipe *pipe)
 {
-	DPRINTF(0,("usbf_stall_pipe not implemented\n"));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s\n", __func__));
 }
 
 
@@ -1142,7 +1156,8 @@ usbp_set_endpoint_feature(struct usbp_device *dev, u_int8_t address,
 {
 	struct usbd_endpoint *ep;
 
-	DPRINTF(0,("usbf_set_endpoint_feature: dev=%p address=%#x"
+	DPRINTF(USBP_DEBUG_TRACE,
+	    ("usbf_set_endpoint_feature: dev=%p address=%#x"
 	    " value=%#x\n", dev, address, value));
 
 	ep = usbp_device_endpoint(dev, address);
@@ -1165,7 +1180,8 @@ usbp_clear_endpoint_feature(struct usbp_device *dev, u_int8_t address,
 {
 	struct usbd_endpoint *ep;
 
-	DPRINTF(0,("usbf_clear_endpoint_feature: device=%p address=%#x"
+	DPRINTF(USBP_DEBUG_TRACE,
+	    ("usbf_clear_endpoint_feature: device=%p address=%#x"
 	    " value=%#x\n", dev, address, value));
 
 	ep = usbp_device_endpoint(dev, address);
@@ -1197,7 +1213,8 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 	u_int16_t index;
 	struct usbp_bus *bus = (struct usbp_bus *)(dev->usbd.bus);
 
-	DPRINTF(9, ("%s: xfer=%p ep0state=%d  bRequest=0x%x bmRequestType=0x%x\n",
+	DPRINTF(USBP_DEBUG_TRACE,
+	    ("%s: xfer=%p ep0state=%d  bRequest=0x%x bmRequestType=0x%x\n",
 		__func__, xfer, bus->ep0state, req->bRequest, req->bmRequestType));
 
 	/* XXX */
@@ -1209,7 +1226,8 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 	}
 
 	if (err) {
-		DPRINTF(0,("usbp_do_request: receive failed, %s\n",
+		DPRINTF(USBP_DEBUG_TRACE,
+		    ("usbp_do_request: receive failed, %s\n",
 		    usbd_errstr(err)));
 		return;
 	}
@@ -1243,7 +1261,7 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 		break;
 
 	case C(UR_GET_STATUS, UT_READ_DEVICE):
-		DPRINTF(1,("%s: UR_GET_STATUS %d\n", __func__,
+		DPRINTF(USBP_DEBUG_TRACE,("%s: UR_GET_STATUS %d\n", __func__,
 			    UGETW(req->wLength)));
 		data = &dev->status;
 		USETW(req->wLength, MIN(UGETW(req->wLength),
@@ -1288,17 +1306,20 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 		err = pass_request_to_iface(dev, req, &data);
 	}
 
-	DPRINTF(5,("usbp_do_request: %d err=%d wLength=%d\n", __LINE__, err, UGETW(req->wLength)));
+	DPRINTF(USBP_DEBUG_TRACE,
+	    ("usbp_do_request: %d err=%d wLength=%d\n",
+		__LINE__, err, UGETW(req->wLength)));
 
 	if (err) {
-		DPRINTF(0,("usbp_do_request: request=%#x, type=%#x "
-		    "failed, %s\n", req->bRequest, req->bmRequestType,
-		    usbd_errstr(err)));
+		DPRINTF(USBP_DEBUG_TRACE,
+		    ("usbp_do_request: request=%#x, type=%#x "
+			"failed, %s\n", req->bRequest, req->bmRequestType,
+			usbd_errstr(err)));
 		usbp_stall_pipe(dev->usbd.default_pipe);
 	} else if (UGETW(req->wLength) > 0) {
 		if (data == NULL) {
-			DPRINTF(0,("usbp_do_request: no data, "
-			    "sending ZLP\n"));
+			DPRINTF(USBP_DEBUG_TRACE, ("usbp_do_request: no data, "
+				"sending ZLP\n"));
 			USETW(req->wLength, 0);
 		}
 		printf("%s: reply IN data length=%d\n", __func__, UGETW(req->wLength));
@@ -1307,7 +1328,7 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 		    NULL, data, UGETW(req->wLength), 0, 0, NULL);
 		err = usbp_transfer(dev->data_xfer);
 		if (err && err != USBD_IN_PROGRESS) {
-			DPRINTF(0,("usbp_do_request: data xfer=%p, %s\n",
+			DPRINTF(USBP_DEBUG_TRACE,("usbp_do_request: data xfer=%p, %s\n",
 			    xfer, usbd_errstr(err)));
 		}
 	}
@@ -1318,11 +1339,11 @@ next:
 	    0, NULL, &dev->def_req, sizeof (dev->def_req), 0, usbp_do_request);
 	err = usbp_transfer(dev->default_xfer);
 	if (err && err != USBD_IN_PROGRESS) {
-		DPRINTF(0,("usbp_do_request: ctrl xfer=%p, %s\n", xfer,
+		DPRINTF(USBP_DEBUG_TRACE,("usbp_do_request: ctrl xfer=%p, %s\n", xfer,
 		    usbd_errstr(err)));
 	}
 
-	DPRINTF(5,("usbp_do_request: done\n"));
+	DPRINTF(USBP_DEBUG_TRACE,("usbp_do_request: done\n"));
 }
 
 
@@ -1333,11 +1354,11 @@ pass_request_to_iface(struct usbp_device *dev, usb_device_request_t *req, void *
 	usbd_status err = USBD_STALLED;
 	struct usbp_interface *iface;
 
-	DPRINTF(5, ("%s: picked_interfaces=%d\n", __func__, dev->n_picked_interfaces));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s: picked_interfaces=%d\n", __func__, dev->n_picked_interfaces));
 	for (i=0; i < dev->n_picked_interfaces; ++i) {
 		iface = dev->picked_interfaces[i];
 
-		DPRINTF(5, ("%s: iface=%p handler=%p\n", __func__,
+		DPRINTF(USBP_DEBUG_TRACE, ("%s: iface=%p handler=%p\n", __func__,
 			iface, iface->methods->handle_device_request));
 
 		if (iface->methods->handle_device_request == NULL)
@@ -1423,7 +1444,7 @@ usbp_abort_pipe(struct usbd_pipe *pipe)
 	pipe->aborting = 1;
 
 	while ((xfer = SIMPLEQ_FIRST(&pipe->queue)) != NULL) {
-		DPRINTF(0,("usbf_abort_pipe: pipe=%p, xfer=%p\n", pipe,
+		DPRINTF(USBP_DEBUG_TRACE,("usbf_abort_pipe: pipe=%p, xfer=%p\n", pipe,
 		    xfer));
 		/* Make the DC abort it (and invoke the callback). */
 		pipe->methods->abort(xfer);
@@ -1494,7 +1515,7 @@ usbp_transfer_complete(struct usbd_xfer *xfer)
 	int repeat = pipe->repeat;
 
 	//SPLUSBCHECK;
-	DPRINTF(1,("usbp_transfer_complete: xfer=%s pipe=%p running=%d callback=%p\n",
+	DPRINTF(USBP_DEBUG_TRACE,("usbp_transfer_complete: xfer=%s pipe=%p running=%d callback=%p\n",
 		   usbp_describe_xfer(xfer), pipe, pipe->running, xfer->callback));
 #ifdef USBP_DEBUG
 	if (usbpdebug > 20)
@@ -1510,7 +1531,7 @@ usbp_transfer_complete(struct usbd_xfer *xfer)
 	if (xfer->status == USBD_NORMAL_COMPLETION &&
 	    xfer->actlen < xfer->length &&
 	    !(xfer->flags & USBD_SHORT_XFER_OK)) {
-		DPRINTF(0,("usbf_transfer_complete: short xfer=%p %u<%u\n",
+		DPRINTF(USBP_DEBUG_TRACE,("usbf_transfer_complete: short xfer=%p %u<%u\n",
 		    xfer, xfer->actlen, xfer->length));
 		xfer->status = USBD_SHORT_XFER;
 	}
@@ -1541,7 +1562,7 @@ usbp_insert_transfer(struct usbd_xfer *xfer)
 	int s;
 
 
-	DPRINTF(1,("%s: xfer=%s pipe=%p running=%d callback=%p\n", __func__,
+	DPRINTF(USBP_DEBUG_TRACE,("%s: xfer=%s pipe=%p running=%d callback=%p\n", __func__,
 		   usbp_describe_xfer(xfer),
 		   pipe, pipe->running, xfer->callback));
 
@@ -1563,7 +1584,7 @@ usbp_start_next(struct usbd_pipe *pipe)
 	struct usbd_xfer *xfer;
 	usbd_status err;
 
-	DPRINTF(1,("%s: pipe=%p running=%d first xfer=%p\n", __func__, pipe, pipe->running,
+	DPRINTF(USBP_DEBUG_TRACE,("%s: pipe=%p running=%d first xfer=%p\n", __func__, pipe, pipe->running,
 		SIMPLEQ_FIRST(&pipe->queue)));
 		
 	//SPLUSBCHECK;
@@ -1779,7 +1800,7 @@ usbp_add_interface(struct usbp_device *dev,
 	struct usbp_interface_spec *ispec_copy;
 
 
-	DPRINTF(5, ("%s: dev=%p empty_string=%p\n", __func__, dev, dev->empty_string));
+	DPRINTF(USBP_DEBUG_TRACE, ("%s: dev=%p empty_string=%p\n", __func__, dev, dev->empty_string));
 
 	usbp_init_interface(dev, iface);
 
@@ -1893,14 +1914,15 @@ usbp_intern_string(struct usbp_device *usbdev, const char *string)
 	int id;
 	char *tmp;
 	
-	DPRINTF(5, ("%s %s\n", __func__, string));
+	DPRINTF(USBP_DEBUG_TRACE|USBP_DEBUG_STRING,
+	    ("%s %s\n", __func__, string));
 	
 	if (string == NULL) {
 #if 1
 		return NULL;
 #else
 		s = usbdev->empty_string;
-		DPRINTF(5, ("%s empty=%p\n", __func__, s));
+		DPRINTF(USBP_DEBUG_TRACE, ("%s empty=%p\n", __func__, s));
 		s->refcount++;
 		return s;
 #endif
@@ -1922,7 +1944,7 @@ usbp_intern_string(struct usbp_device *usbdev, const char *string)
 		++id) {
 	}
 
-	DPRINTF(5, ("%s new id=%d\n", __func__, id));
+	DPRINTF(USBP_DEBUG_STRING, ("%s new id=%d\n", __func__, id));
 	
 	if (id > USBP_STRING_ID_MAX) {
 		aprint_error_dev(usbdev->usbp, "Too many strings");
@@ -1935,12 +1957,12 @@ usbp_intern_string(struct usbp_device *usbdev, const char *string)
 	if (s == NULL) {
 		aprint_error_dev(usbdev->usbp, "out of memory for a string");
 		s = usbdev->empty_string;
-		DPRINTF(5, ("%s empty_string=%p\n", __func__, s));
+		DPRINTF(USBP_DEBUG_STRING, ("%s empty_string=%p\n", __func__, s));
 		s->refcount++;
 		return s;
 	}
 
-	DPRINTF(5, ("%s new entry\n", __func__));
+	DPRINTF(USBP_DEBUG_STRING, ("%s new entry\n", __func__));
 
 	tmp = (uint8_t *)s + sizeof (*s);
 	memcpy(tmp, string, len+1);
