@@ -195,6 +195,9 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 
 	DPRINTF(10, ("%s\n", __func__));
 
+	aprint_normal(": CDC ethernet\n");
+	aprint_naive("\n");
+
 	sc->sc_dev = self;
 	sc->sc_xfer_in = sc->sc_xfer_out = NULL;
 	sc->sc_buffer_in = sc->sc_buffer_out = NULL;
