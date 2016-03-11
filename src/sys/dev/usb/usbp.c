@@ -142,6 +142,7 @@ struct usbp_device {
 };
 
 
+
 struct usbp_string {
 	SIMPLEQ_ENTRY (usbp_string) next;
 	const char *str;
@@ -164,6 +165,8 @@ struct usbp_softc {
 #endif
 	bool sc_dying;
 	u_int8_t		*sc_hs_config;
+
+	device_t sc_user_if;
 };
 
 static const char *usbrev_str[] = USBREV_STR;
@@ -213,11 +216,12 @@ CFATTACH_DECL3_NEW(usbp, sizeof(struct usbp_softc),
 #define	USBP_DEBUG_MISC 	(1<<1)
 #define	USBP_DEBUG_CONTROLLER 	(1<<4)
 #define	USBP_DEBUG_DESCRIPTOR	(1<<5)
+#define	USBP_DEBUG_USR   	(1<<7)
 #define	USBP_DEBUG_STRING	(1<<8)
 #ifndef USBP_DEBUG
 #define DPRINTF(l, x)	do {} while (0)
 #else
-int usbpdebug = 0xffffffff;
+int usbpdebug = USBP_DEBUG_TRACE|USBP_DEBUG_CONTROLLER|USBP_DEBUG_USR;
 #define DPRINTF(l, x)	if ((l) & usbpdebug) printf x; else
 #endif
 
@@ -287,6 +291,10 @@ usbp_attach(device_t parent, device_t self, void *aux)
 		sc->sc_dying = true;
 		return;
 	}
+
+	/* attach userland I/F */
+	uia.busname = "usbpu";
+	sc->sc_user_if = config_found_sm_loc(self, "usbp", NULL, &uia, NULL, NULL);
 
 	config_defer(self, start_usbp);
 #if 0
@@ -653,6 +661,8 @@ reassemble_interfaces(struct usbp_device *device)
 	struct usbp_bus *bus = (struct usbp_bus *)device->usbd.bus;
 	int s;
 
+	s = splhardusb();
+
 	n_new = select_interfaces(device, ifa);
 
 	DPRINTF(USBP_DEBUG_TRACE,
@@ -670,7 +680,6 @@ reassemble_interfaces(struct usbp_device *device)
 		}
 	} while (0);
 	
-	s = splhardusb();
 
 	if (!compare_interfaces(ifa, n_new, device->picked_interfaces,
 		device->n_picked_interfaces)) {
@@ -693,6 +702,7 @@ reassemble_interfaces(struct usbp_device *device)
 			// unconfigure
 			for (i=0; i < device->n_picked_interfaces; ++i) {
 				deactivate_interface(device->picked_interfaces[i]);
+				usbp_unref_interface(device->picked_interfaces[i]);
 			}
 
 			kmem_free(device->picked_interfaces,
@@ -729,6 +739,7 @@ reassemble_interfaces(struct usbp_device *device)
 				struct usbp_interface *iface = ifa[i].iface;
 				activate_interface(iface);
 				device->picked_interfaces[i] = iface;
+				iface->ref_count++;
 			}
 
 			device->dev_state = USBP_DEV_ASSEMBLED;
@@ -1886,6 +1897,7 @@ usbp_add_interface(struct usbp_device *dev,
 
 	SIMPLEQ_INSERT_HEAD(&dev->interface_list, iface, next);
 	dev->n_interfaces++;
+	iface->ref_count++;
 
 	*iface_ret = iface;
 	return USBD_NORMAL_COMPLETION;
@@ -1899,6 +1911,13 @@ nomem:
 	
 }
 
+void
+usbp_unref_interface(struct usbp_interface *iface)
+{
+	if (--iface->ref_count <= 0)
+		usbp_interface_free(iface);
+}
+
 usbd_status
 usbp_delete_interface(struct usbp_interface *iface)
 {
@@ -1909,6 +1928,8 @@ usbp_delete_interface(struct usbp_interface *iface)
 	
 	SIMPLEQ_REMOVE(&dev->interface_list, iface, usbp_interface, next);
 	dev->n_interfaces--;
+	usbp_unref_interface(iface);
+	/* iface may be free-ed here */
 
 	if (dev->dev_state != USBP_DEV_INIT) {
 		// reconfigure
@@ -1917,9 +1938,6 @@ usbp_delete_interface(struct usbp_interface *iface)
 			return err;
 	}
 		
-	usbp_interface_free(iface);
-
-	iface->usbd.device = NULL;
 	return err;
 }
 
@@ -1935,14 +1953,14 @@ usbp_intern_string(struct usbp_device *usbdev, const char *string)
 	char *tmp;
 	
 	DPRINTF(USBP_DEBUG_TRACE|USBP_DEBUG_STRING,
-	    ("%s %s\n", __func__, string));
+	    ("%s %p [%s]\n", __func__, string, string));
 	
 	if (string == NULL) {
 #if 1
 		return NULL;
 #else
 		s = usbdev->empty_string;
-		DPRINTF(USBP_DEBUG_TRACE, ("%s empty=%p\n", __func__, s));
+		DPRINTF(USBP_DEBUG_STRING, ("%s empty=%p\n", __func__, s));
 		s->refcount++;
 		return s;
 #endif
@@ -1951,11 +1969,17 @@ usbp_intern_string(struct usbp_device *usbdev, const char *string)
 	len = strlen(string);
 
 	SIMPLEQ_FOREACH(s, &usbdev->string_list, next) {
+		DPRINTF(USBP_DEBUG_STRING,
+		    ("%s %p [%s]\n", __func__, s, s->str));
+	
 		if (0 == strcmp(string, s->str)) {
+			DPRINTF(USBP_DEBUG_STRING, ("%s already registered\n", __func__));
 			s->refcount++;
 			return s;
 		}
 	}
+
+	DPRINTF(USBP_DEBUG_STRING, ("%s no match\n", __func__));
 
 	/* XXX: need faster way */
 	for (id = USBP_STRING_ID_MIN;
@@ -2192,6 +2216,55 @@ usbp_set_pulldown(device_t self, bool on)
 	return 0;
 }
 
+static usbd_status
+usbpu_on_configured(struct usbp_interface *iface)
+{
+	return USBD_NORMAL_COMPLETION;
+}
+
+static usbd_status
+usbpu_on_unconfigured(struct usbp_interface *iface)
+{
+	return USBD_NORMAL_COMPLETION;
+}
+
+
+static const struct usbp_interface_methods usbpu_methods = {
+	usbpu_on_configured,
+	usbpu_on_unconfigured,
+	NULL,
+	NULL
+};
+
+static int
+copy_strings(struct usbp_add_iface_request *r, char *buf, size_t buflen)
+{
+	int e, i;
+	const char **string_to_copy[] = {
+		&r->devinfo.manufacturer_name,
+		&r->devinfo.product_name,
+		&r->devinfo.serial,
+		&r->ispec.description,
+	};
+	size_t buf_used = 0, copy_len;
+
+	for (i=0; i < __arraycount(string_to_copy); ++i) {
+		if (buf_used >= buflen)
+			return ENOMEM;
+
+		if (*string_to_copy[i] == NULL)
+			continue;
+		
+		e = copyinstr(*string_to_copy[i], buf+buf_used, buflen - buf_used, &copy_len);
+		if (e < 0)
+			return e;
+		*string_to_copy[i] = buf + buf_used;
+		buf_used += copy_len;
+	}
+
+	return 0;
+}
+
 int
 usbp_add_iface(device_t self, struct usbp_add_iface *req, int flag, struct lwp *lwp)
 {
@@ -2199,9 +2272,13 @@ usbp_add_iface(device_t self, struct usbp_add_iface *req, int flag, struct lwp *
 	size_t copy_len;
 	struct usbp_add_iface_request *r;
 	void *area;
+	char string_buf[1024];
+	usbd_status ue;
+	struct usbp_interface *iface;
+	struct usbp_softc *sc = device_private(self);
 	
-	DPRINTF(USBP_DEBUG_USR, ("%s: req=%p req->request=%p flag=%x\n", __func__,
-		req, req->request, flag));
+	DPRINTF(USBP_DEBUG_USR, ("%s: sc=%p req=%p req->request=%p flag=%x\n", __func__,
+		device_private(self), req, req->request, flag));
 
 	copy_len = sizeof *r + USB_MAX_ENDPOINTS * sizeof (struct usbp_endpoint_request);
 	area = alloca(copy_len);
@@ -2214,7 +2291,14 @@ usbp_add_iface(device_t self, struct usbp_add_iface *req, int flag, struct lwp *
 	    r->devinfo.class_id, r->ispec.protocol,
 	    r->devinfo.manufacturer_name);
 
+	
+	e = copy_strings(r, string_buf, sizeof string_buf);
+	if (e)
+		return e;
+
 	req->ifaceid = 0x5555;
 
-	return 0;
+	ue = usbp_add_interface(sc->sc_usbdev, r, &usbpu_methods, NULL, 0, &iface);
+
+	return ue == USBD_NORMAL_COMPLETION ? 0 : EINVAL;
 }

@@ -9,11 +9,16 @@ device	usbp {}
 attach	usbp at usbdev
 file	dev/usb/usbp.c		usbp	needs-flag
 
+# Userland interface for USBP
+device usbpusr {}
+attach usbpusr at usbp
+file   dev/usb/usbpusr.c	usbpusr
+
+# USB interface drivers
+#
 device	cdcef {}
 attach	cdcef at usbp
 file	dev/usb/if_cdcef.c	cdcef
-
-define	upcom
 
 # emulate FTDI serial driver
 device	upftdi: ucombus

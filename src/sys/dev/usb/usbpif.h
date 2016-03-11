@@ -89,7 +89,7 @@ struct usbp_add_iface_request {
 };
 
 
-#define	USBP_IOC_SETPULLUP	_IOW('U', 512, int)
+#define	USBP_IOC_SETPULLDOWN	_IOW('U', 512, int)
 
 #define	USBP_IOC_ADDIFACE	_IOWR('U', 513, struct usbp_add_iface)
 struct usbp_add_iface {

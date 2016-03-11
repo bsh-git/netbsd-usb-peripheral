@@ -106,12 +106,15 @@ struct usbp_interface {
 
 	const struct usbp_interface_methods *methods;
 
+	int ref_count;
 	size_t alloc_size;
 	SIMPLEQ_ENTRY(usbp_interface) next;	// list of interfaces in a device.
 };
 
 void usbp_init_interface(struct usbp_device *, struct usbp_interface *);
 #define	usbp_interface_to_device(iface)	((struct usbp_device *)iface->usbd.device)
+void usbp_unref_interface(struct usbp_interface *);
+void usbp_ref_interface(struct usbp_interface *);
 
 int usbp_interface_number(struct usbp_interface *iface);
 u_int8_t usbd_endpoint_address(struct usbd_endpoint *);
@@ -174,5 +177,9 @@ usbd_status usbp_add_interface(struct usbp_device *,
 );
     
 usbd_status usbp_delete_interface(struct usbp_interface *);
+
+/* usbp <- usbpu */
+int usbp_set_pulldown(device_t, bool);
+int usbp_add_iface(device_t, struct usbp_add_iface *, int, struct lwp *);
 
 #endif	/* _USBP_H */

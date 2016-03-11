@@ -374,19 +374,16 @@ ld* at sdmmc?				# MMC/SD card
 #  (attached on obio for USB host detection)
 pxaudc0 at obio?
 
-# USB function support
-#usbf*		at pxaudc?		# USB logical device
-#cdcef*		at usbf?		# CDC ethernet function
-#options  	USBF_DEBUG
-#options	CDCEF_DEBUG
-
-usbp*		at pxaudc?		# USB logical device
+usbp0		at pxaudc?		# Peripheral-side USB logical device
 options 	USB_DEBUG
 options  	USBP_DEBUG
-#cdcef*		at usbp?		# CDC ethernet function
-#options 	CDCEF_DEBUG
 
-upftdi*		at usbp?		# FTDI emulation on peripheral-side of USB
+usbpusr*	at usbp?		# userland gateway for USB peripheral
+
+cdcef0		at usbp0		# CDC ethernet function
+options 	CDCEF_DEBUG
+
+upftdi0		at usbp0		# FTDI emulation on peripheral-side of USB
 ucom*		at upftdi?
 options 	UCOM_DEBUG
 
@@ -423,6 +420,9 @@ pseudo-device	loop			# network loopback
 # miscellaneous pseudo-devices
 pseudo-device	pty			# pseudo-terminals
 pseudo-device	clockctl		# user control of clock subsystem
+
+# userland interface to drivers, including autoconf and properties retrieval
+pseudo-device	drvctl
 
 # wscons pseudo-devices
 pseudo-device	wsmux			# mouse & keyboard multiplexor
