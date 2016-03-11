@@ -57,7 +57,7 @@ struct usbp_bus_methods {
 	usbd_status (* select_endpoint)(
 		struct usbp_bus *, struct usbp_endpoint_request *, u_int);
 	usbd_status (* enable)(struct usbp_bus *, bool);
-	void (* pullup_control)(struct usbp_bus *, bool);
+	void (* pulldown_control)(struct usbp_bus *, bool);
 	bool (* is_connected)(struct usbp_bus *);
 };
 

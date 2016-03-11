@@ -74,7 +74,7 @@ CFATTACH_DECL_NEW(pxaudc_obio, sizeof(struct g42xxeb_udc_softc),
     pxaudc_match, pxaudc_attach, NULL, NULL);
 
 static int g42xxeb_udc_intr(void *arg);
-static void g42xxeb_udc_pullup_control(struct usbp_bus *, bool);
+static void g42xxeb_udc_pulldown_control(struct usbp_bus *, bool);
 //static usbd_status g42xxeb_enable(struct usbp_bus *, bool);
 static bool g42xxeb_udc_is_connected(struct usbp_bus *);
 
@@ -87,8 +87,10 @@ pxaudc_match(device_t parent, cfdata_t cf, void *aux)
 	return 0;
 }
 
+#define	GPIO_DPLUS_PULLDOWN 21
+
 struct pxa2x0_gpioconf g42xxeb_pxaudc_gpioconf[] = {
-	{  21, GPIO_SET | GPIO_OUT },	/* USB_CONTROL */
+	{  GPIO_DPLUS_PULLDOWN, GPIO_SET | GPIO_OUT },	/* USB_CONTROL */
 	{  -1 }
 };
 
@@ -96,7 +98,7 @@ struct pxa2x0_gpioconf g42xxeb_pxaudc_gpioconf[] = {
 static const struct usbp_bus_methods g42xxeb_bus_methods = {
 	NULL,	/* provided by UDC driver */
 	NULL,
-	g42xxeb_udc_pullup_control,
+	g42xxeb_udc_pulldown_control,
 	g42xxeb_udc_is_connected
 };
 
@@ -194,9 +196,14 @@ g42xxeb_udc_is_connected(struct usbp_bus *bus)
 }
 
 static void
-g42xxeb_udc_pullup_control(struct usbp_bus *bus, bool on)
+g42xxeb_udc_pulldown_control(struct usbp_bus *bus, bool on)
 {
 	struct g42xxeb_udc_softc *sc =  bus->usbd.hci_private;
 
 	printf("%s: %s: %s\n", DEVNAME(sc), __func__, on ? "ON" : "off");
+
+	if (on)
+		pxa2x0_gpio_set_bit(GPIO_DPLUS_PULLDOWN);
+	else
+		pxa2x0_gpio_clear_bit(GPIO_DPLUS_PULLDOWN);
 }

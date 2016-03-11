@@ -676,8 +676,8 @@ reassemble_interfaces(struct usbp_device *device)
 		device->n_picked_interfaces)) {
 		/* set of active interfaces has changed. */
 		if (device->dev_state >= USBP_DEV_READY) {
-			if (bus->usbp_methods->pullup_control)
-				bus->usbp_methods->pullup_control(bus, false);
+			if (bus->usbp_methods->pulldown_control)
+				bus->usbp_methods->pulldown_control(bus, false);
 			
 			device->dev_state = USBP_DEV_ASSEMBLED;
 		}
@@ -741,8 +741,8 @@ reassemble_interfaces(struct usbp_device *device)
 	    (old_state >= USBP_DEV_READY || device->connect_auto)) {
 		if (bus->usbp_methods->enable)
 			bus->usbp_methods->enable(bus, true);
-		if (bus->usbp_methods->pullup_control)
-			bus->usbp_methods->pullup_control(bus, true);
+		if (bus->usbp_methods->pulldown_control)
+			bus->usbp_methods->pulldown_control(bus, true);
 		device->dev_state = USBP_DEV_READY;
 
 		if (is_vbus_on(bus)) 
@@ -2181,13 +2181,13 @@ usbp_child_detached(device_t self, device_t child)
  * for usbpusr
  */
 int
-usbp_set_pullup(device_t self, bool on)
+usbp_set_pulldown(device_t self, bool on)
 {
 	struct usbp_softc *sc = device_private(self);
 	struct usbp_bus *bus = sc->sc_bus;
 
-	if (bus->usbp_methods->pullup_control)
-		bus->usbp_methods->pullup_control(bus, on);
+	if (bus->usbp_methods->pulldown_control)
+		bus->usbp_methods->pulldown_control(bus, on);
 	
 	return 0;
 }
