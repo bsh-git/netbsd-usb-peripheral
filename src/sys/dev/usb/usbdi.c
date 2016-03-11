@@ -172,13 +172,11 @@ usbd_open_pipe_ival(usbd_interface_handle iface, u_int8_t address,
 
 		if (ep->edesc == NULL)
 			return (USBD_IOERROR);
-		printf("%s: %p 0x%x\n", __func__, ep, ep->edesc->bEndpointAddress);
 		if (ep->edesc->bEndpointAddress == address)
 			goto found;
 	}
 	return (USBD_BAD_ADDRESS);
  found:
-	printf("%s: %d: found i=%d\n", __func__, __LINE__, i);
 	if ((flags & USBD_EXCLUSIVE_USE) && ep->refcnt != 0)
 		return (USBD_IN_USE);
 	err = usbd_setup_pipe_flags(iface->device, iface, ep, ival, &p, flags);

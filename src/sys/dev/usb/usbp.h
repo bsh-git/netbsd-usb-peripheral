@@ -20,6 +20,7 @@ struct usbp_device;
  * Attach USB function at the logical device.
  */
 struct usbp_interface_attach_args {
+	const char *busname;
 	struct usbp_device *device;
 };
 
@@ -80,8 +81,6 @@ enum USBP_IF_STRINGS {
 struct usbp_interface {
 	struct usbd_interface usbd;
 
-	struct usbp_config *config;
-
 	/* device information.  used if this is the primay interface of the device*/
 	struct {
 		bool class_id_valid;
@@ -97,6 +96,7 @@ struct usbp_interface {
 	
 	/* interface spec */
 	const struct usbp_interface_spec *ispec;
+	const struct usbp_endpoint_request *epreq;
 
 	int num_strings;
 	struct usbp_string **string;
@@ -106,6 +106,7 @@ struct usbp_interface {
 
 	const struct usbp_interface_methods *methods;
 
+	size_t alloc_size;
 	SIMPLEQ_ENTRY(usbp_interface) next;	// list of interfaces in a device.
 };
 
@@ -165,14 +166,13 @@ void usbp_dump_buffer(struct usbd_xfer *xfer);
 
 /* New APIs */
 usbd_status usbp_add_interface(struct usbp_device *,
-    struct usbp_interface *,
-    const struct usbp_device_info *,
-    const struct usbp_interface_spec *,
+    const struct usbp_add_iface_request *,
     const struct usbp_interface_methods *,
-    const void *additional_interface_descriptor,
-    size_t additional_interface_descriptor_size);
+    const void *,         /* additional_interface_descriptor */
+    size_t,  		/* additional_interface_descriptor_size */
+    struct usbp_interface **	/* returns the created interface object */
+);
     
 usbd_status usbp_delete_interface(struct usbp_interface *);
-    
 
 #endif	/* _USBP_H */

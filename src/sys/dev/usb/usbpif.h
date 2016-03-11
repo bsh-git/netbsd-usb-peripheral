@@ -27,6 +27,8 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+#include <dev/usb/usb.h>
+
 #ifndef _USBPIF_H
 #define _USBPIF_H
 
@@ -51,12 +53,12 @@ struct usbp_device_info {
  * requirements of an endpoint used by the interface
  */
 struct usbp_endpoint_request {
-	uint8_t address;	/* (UE_DIR_IN or UE_DIR_OUT) + index.
-				   Normallffy, set index to 0 to let the client controller
-				   select it.
-				   Alternatively, you can specify the address explictly
-				   but not recommended. */
+	uint8_t dir;	/* (UE_DIR_IN or UE_DIR_OUT) */
 	uint8_t attributes;	/* Transfer type: UE_ISOCHROMOUS, UE_BULK, UE_INTERRUPT */
+	uint8_t epnum;	/* set 0 to let the client controller select
+			 * suitable endpoint.  Alternatively, you can
+			 * specify the endpoint number explictly but
+			 * not recommended. */
 #ifdef notyet
 	bool optional;	/* true if the interface can work without this endpoint */
 #endif
@@ -70,15 +72,33 @@ struct usbp_interface_spec {
 	uByte class_id;
 	uByte subclass_id;
 	uByte protocol;
+	const char *description;
 	enum USBP_PIPE0_USAGE {
 		USBP_PIPE0_NOTUSED, /* this interface doesn't use pipe #0 */
 		USBP_PIPE0_SHARED,  /* pipe#0 is shared among interfaces,
 				       by means of interface number in the packets */
 		USBP_PIPE0_EXCLUSIVE /* this interface requires an exclusive use of pipe#0 */
 	} pipe0_usage;
-	const char *description;
 	uint8_t num_endpoints;	/* the number of endpoints used by this interface excluding ep0. */
+};
+
+struct usbp_add_iface_request {
+	struct usbp_device_info devinfo;
+	struct usbp_interface_spec ispec;
 	struct usbp_endpoint_request endpoints[];
 };
+
+
+#define	USBP_IOC_SETPULLUP	_IOW('U', 512, int)
+
+#define	USBP_IOC_ADDIFACE	_IOWR('U', 513, struct usbp_add_iface)
+struct usbp_add_iface {
+	int	ifaceid;	/* interface ID is returned on success */
+	const struct usbp_add_iface_request *request;
+};
+
+//#define USB_DISCOVER		_IO  ('U', 3)
+
+
 
 #endif	/* _USBPIF_H */

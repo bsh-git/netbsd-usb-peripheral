@@ -78,7 +78,7 @@ int upftdidebug = 20;
 
 struct upftdi_softc {
 	device_t	sc_dev;
-	struct usbp_interface	sc_iface;
+	struct usbp_interface	*sc_iface;
 	int			sc_rxeof_errors;
 
 	bool sc_dying;
@@ -176,56 +176,29 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 	//int s;
 
 
-	static const struct usbp_device_info devdata = {
-		.class_id = UDCLASS_IN_INTERFACE,
-		.subclass_id = 0,
-		.protocol = 0,
-		.vendor_id = USB_VENDOR_FTDI,
-		.product_id = USB_PRODUCT_FTDI_SERIAL_230X,
-		.bcd_device = UPFTDI_DEVICE_CODE,
-		.manufacturer_name = UPFTDI_VENDOR_STRING,
-		.product_name = UPFTDI_PRODUCT_STRING,
-		.serial = UPFTDI_SERIAL_STRING
-	};
-#if 0
-	struct usbp_interface_spec *ispec = alloca(sizeof (struct usbp_interface_spec) +
-	    n_comdevs * 2 * sizeof (struct usbp_endpoint_request));
-
-	static const struct usbp_endpoint_request
-	    in_spec ={.address = UE_DIR_IN | 0,
-		      .attributes = UE_BULK,
-		      .packetsize = 64},
-	    out_spec = {.address = UE_DIR_OUT | 0,
-			.attributes = UE_BULK,
-			.packetsize = 64};
-
-
-	ispec->class_id = UICLASS_VENDOR;
-	ispec->subclass_id = UICLASS_VENDOR;
-	ispec->protocol = 0;
-	ispec->pipe0_usage = USBP_PIPE0_OCCUPIED;
-	ispec->description = NULL;
-	ispec->num_endpoints = n_comdevs * 2;
-
-	for (idx=0; idx < n_comdevs; ++idx) {
-		ispec->endpoints[idx * 2] = in_spec;
-		ispec->endpoints[idx * 2 + 1] = out_spec;
-	}
-#else
-	static struct usbp_interface_spec _ispec = {
-		.class_id = UICLASS_VENDOR,
-		.subclass_id = UICLASS_VENDOR,
-		.protocol = 0,
-		.pipe0_usage = USBP_PIPE0_EXCLUSIVE,
-		.description = NULL,
-		.num_endpoints = 2,
-		.endpoints = {
-			{.address = UE_DIR_IN | 0, .attributes = UE_BULK, .packetsize = 64},
-			{.address= UE_DIR_OUT | 0, .attributes = UE_BULK, .packetsize = 64},
+	static const struct usbp_add_iface_request iface_req = {
+		.devinfo = {
+			.class_id = UDCLASS_IN_INTERFACE,
+			.subclass_id = 0,
+			.protocol = 0,
+			.vendor_id = USB_VENDOR_FTDI,
+			.product_id = USB_PRODUCT_FTDI_SERIAL_230X,
+			.bcd_device = UPFTDI_DEVICE_CODE,
+			.manufacturer_name = UPFTDI_VENDOR_STRING,
+			.product_name = UPFTDI_PRODUCT_STRING,
+			.serial = UPFTDI_SERIAL_STRING
+		}, .ispec = {
+			.class_id = UICLASS_VENDOR,
+			.subclass_id = UICLASS_VENDOR,
+			.protocol = 0,
+			.pipe0_usage = USBP_PIPE0_EXCLUSIVE,
+			.description = NULL,
+			.num_endpoints = 2,
+		}, .endpoints = {
+			{.dir = UE_DIR_IN, .attributes = UE_BULK },
+			{.dir = UE_DIR_OUT, .attributes = UE_BULK },
 		}
 	};
-	struct usbp_interface_spec *ispec = &_ispec;
-#endif
 
 	aprint_normal(": enulates FTDI USB serial\n");
 	aprint_naive("\n");
@@ -234,19 +207,17 @@ upftdi_attach(device_t parent, device_t self, void *aux)
 		sc,
 		&upftdi_if_methods));
 	
-	err = usbp_add_interface(dev, &sc->sc_iface, &devdata, ispec,
-	    &upftdi_if_methods, NULL, 0);
+	err = usbp_add_interface(dev, &iface_req, &upftdi_if_methods, NULL, 0,
+	    &sc->sc_iface);
 	if (err != USBD_NORMAL_COMPLETION) {
 		aprint_error_dev(self, "%s: usbp_add_interface failed (%d)\n",
 		    __func__, err);
 		return;
 	}
 
-	sc->sc_iface.usbd.priv = sc;
+	sc->sc_iface->usbd.priv = sc;
 	sc->sc_dev = self;
 	sc->sc_ncomdevs_requested = n_comdevs;
-
-	
 }
 
 
@@ -271,7 +242,7 @@ upftdi_attach_ucom(device_t self, struct usbp_device *udev, int idx,
 	uca.obufsize = UFTDIOBUFSIZE;
 	uca.opkthdrlen = 0; // sc->sc_hdrlen;
 	uca.device = (struct usbd_device *)udev;
-	uca.iface =  &sc->sc_iface.usbd;
+	uca.iface =  &sc->sc_iface->usbd;
 	/* we give bulk_in and bulk_out inside-out here.
 	   because OUT is host-to-device, and it is input for us */
 	uca.bulkin = usbd_endpoint_address(bulk_out);
@@ -588,13 +559,12 @@ static int
 upftdi_detach(device_t self, int flags)
 {
 	struct upftdi_softc *sc = device_private(self);
-	struct usbp_interface *iface = &sc->sc_iface;
 	usbd_status uerr;
 	int err;
 
 	detach_ucoms(sc, flags);
 
-	uerr = usbp_delete_interface(iface);
+	uerr = usbp_delete_interface(sc->sc_iface);
 
 	if (uerr != USBD_NORMAL_COMPLETION)
 		err = EINVAL;	/* XXX */

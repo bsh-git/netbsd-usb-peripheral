@@ -66,7 +66,7 @@
 
 struct cdcef_softc {
 	device_t	sc_dev;
-	struct usbp_interface   sc_iface;
+	struct usbp_interface   *sc_iface;
 	struct usbd_endpoint	*sc_ep_in;
 	struct usbd_endpoint	*sc_ep_out;
 	struct usbd_pipe	*sc_pipe_in;
@@ -161,30 +161,31 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 	struct usbp_interface_attach_args *uaa = aux;
 	struct usbp_device *dev = uaa->device;
 	usbd_status err;
-	static const struct usbp_device_info devdata = {
-		.class_id = UDCLASS_IN_INTERFACE,
-		.subclass_id = 0,
-		.protocol = 0,
-		.vendor_id = CDCEF_VENDOR_ID,
-		.product_id = CDCEF_PRODUCT_ID,
-		.bcd_device = CDCEF_DEVICE_CODE,
-		.manufacturer_name = CDCEF_VENDOR_STRING,
-		.product_name = CDCEF_PRODUCT_STRING,
-		.serial = CDCEF_SERIAL_STRING
-	};
-	static const struct usbp_interface_spec ispec = {
-		.class_id = UICLASS_CDC,
-		.subclass_id = UISUBCLASS_ETHERNET_NETWORKING_CONTROL_MODEL,
-		.protocol = 0,
-		.pipe0_usage = USBP_PIPE0_SHARED,
-		.description = NULL,
-		.num_endpoints = 2,
-		.endpoints = {
-			{.address= UE_DIR_IN | 0, .attributes = UE_BULK, .packetsize = 64},
-			{.address= UE_DIR_OUT | 0, .attributes = UE_BULK, .packetsize = 64},
+	static const struct usbp_add_iface_request  iface_req = {
+		.devinfo = {
+			.class_id = UDCLASS_IN_INTERFACE,
+			.subclass_id = 0,
+			.protocol = 0,
+			.vendor_id = CDCEF_VENDOR_ID,
+			.product_id = CDCEF_PRODUCT_ID,
+			.bcd_device = CDCEF_DEVICE_CODE,
+			.manufacturer_name = CDCEF_VENDOR_STRING,
+			.product_name = CDCEF_PRODUCT_STRING,
+			.serial = CDCEF_SERIAL_STRING
+		}, .ispec = {
+			.class_id = UICLASS_CDC,
+			.subclass_id = UISUBCLASS_ETHERNET_NETWORKING_CONTROL_MODEL,
+			.protocol = 0,
+			.pipe0_usage = USBP_PIPE0_SHARED,
+			.description = NULL,
+			.num_endpoints = 2,
+		}, .endpoints = {
+			{.dir= UE_DIR_IN, .attributes = UE_BULK },
+			{.dir= UE_DIR_OUT, .attributes = UE_BULK },
 		}
 	};
-#ifdef	CDCEF_NO_UNION_DESC
+	
+#ifndef	CDCEF_NO_UNION_DESC
 	static const usb_cdc_union_descriptor_t udesc = {
 		.bLength = sizeof udesc,
 		.bDescriptorType = UDESC_CS_INTERFACE,
@@ -202,15 +203,15 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 	sc->sc_xfer_in = sc->sc_xfer_out = NULL;
 	sc->sc_buffer_in = sc->sc_buffer_out = NULL;
 
-	err = usbp_add_interface(dev, &sc->sc_iface, &devdata,
-				 &ispec, &cdcef_if_methods,
+	err = usbp_add_interface(dev, 
+				 &iface_req,
+				 &cdcef_if_methods,
 #ifndef	CDCEF_NO_UNION_DESC
-				 NULL, 0
+				 &udesc, sizeof udesc,
 #else
-				 &udesc, sizeof udesc
+				 NULL, 0,
 #endif
-
-		);
+				 &sc->sc_iface);
 	if (err != USBD_NORMAL_COMPLETION) {
 		aprint_error_dev(self, "usbp_add_interface failed (%d)\n", err);
 		return;
@@ -231,7 +232,7 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 		goto error_out;
 	}
 
-	sc->sc_iface.usbd.priv = sc;
+	sc->sc_iface->usbd.priv = sc;
 	return;
 
 error_out:
@@ -723,7 +724,7 @@ cdcef_detach(device_t self, int flag)
 
 	// sc->cdce_attached = 0;
 
-	(void)usbp_delete_interface(&sc->sc_iface);
+	(void)usbp_delete_interface(sc->sc_iface);
 	
 	splx(s);
 

@@ -139,7 +139,6 @@ struct usbp_device {
 	/* scratch area to send string descriptor back to the host */
 	usb_string_descriptor_t	string_descriptor;
 
-
 };
 
 
@@ -199,7 +198,10 @@ static const usb_string_descriptor_t *get_string_descriptor(struct usbp_device *
 static usbd_status pass_request_to_iface(struct usbp_device *, usb_device_request_t *, void **);
 
 usb_config_descriptor_t *usbp_config_descriptor(struct usbp_device *dev, u_int8_t index);
-
+static struct usbp_interface *usbp_interface_new(struct usbp_device *,
+    const struct usbp_interface_spec *,
+    const struct usbp_endpoint_request *);
+static void usbp_interface_free(struct usbp_interface *);
 
 extern struct cfdriver usbf_cd;
 
@@ -233,12 +235,13 @@ static void
 usbp_attach(device_t parent, device_t self, void *aux)
 {
 	struct usbp_softc *sc = device_private(self);
-	struct usbp_bus_attach_args *uaa = aux;
+	struct usbp_bus_attach_args *uba = aux;
+	struct usbp_interface_attach_args uia;
 	u_int usbrev, speed;
 	usbd_status err;
 
 	sc->sc_dev = self;
-	sc->sc_bus = uaa->bus;
+	sc->sc_bus = uba->bus;
 	sc->sc_bus->usbd.usbctl = self;
 	sc->sc_bus->usbd.pipe_size = sizeof (struct usbd_pipe);
 
@@ -350,7 +353,7 @@ select_interfaces(struct usbp_device *device, struct iface_assembly *ifa)
 		for (i=0; i < ispec->num_endpoints; ++i) {
 			struct usbp_endpoint_request *ep = &ifa[n_if].epspec[i];
 			usbd_status st;
-			*ep = ispec->endpoints[i];
+			*ep = iface->epreq[i];
 			st = bus->usbp_methods->select_endpoint(bus, ep, tmpmap);
 			DPRINTF(USBP_DEBUG_CONTROLLER,
 			    ("%s: client controller returned %d\n", __func__, st));
@@ -360,7 +363,7 @@ select_interfaces(struct usbp_device *device, struct iface_assembly *ifa)
 				 * device */
 				goto not_used;
 			}
-			tmpmap |= (1<<UE_GET_ADDR(ep->address));
+			tmpmap |= ep->epnum;
 		}
 		epmap = tmpmap;
 		ifa[n_if].n_endpoints = ispec->num_endpoints;
@@ -583,7 +586,7 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 			ed->bLength = USB_ENDPOINT_DESCRIPTOR_SIZE;
 			ed->bDescriptorType = UDESC_ENDPOINT;
 
-			ed->bEndpointAddress = ifa[i].epspec[j].address;
+			ed->bEndpointAddress = ifa[i].epspec[j].epnum | ifa[i].epspec[j].dir;
 			ed->bmAttributes = ifa[i].epspec[j].attributes;
 			USETW(ed->wMaxPacketSize, ifa[i].epspec[j].packetsize);
 
@@ -648,6 +651,7 @@ reassemble_interfaces(struct usbp_device *device)
 	int n_new;
 	enum USBP_DEVICE_STATE old_state = device->dev_state;
 	struct usbp_bus *bus = (struct usbp_bus *)device->usbd.bus;
+	int s;
 
 	n_new = select_interfaces(device, ifa);
 
@@ -660,12 +664,14 @@ reassemble_interfaces(struct usbp_device *device)
 		for (i=0; i < n_new; ++i) {
 			printf("if=%p, %d endpoints: ", ifa[i].iface, ifa[i].n_endpoints);
 			for(j=0; j < ifa[i].n_endpoints; ++j) {
-				printf("0x%x ", ifa[i].epspec[j].address);
+				printf("0x%x ", ifa[i].epspec[j].epnum | ifa[i].epspec[j].dir);
 			}
 			printf("\n");
 		}
 	} while (0);
 	
+	s = splhardusb();
+
 	if (!compare_interfaces(ifa, n_new, device->picked_interfaces,
 		device->n_picked_interfaces)) {
 		/* set of active interfaces has changed. */
@@ -673,9 +679,12 @@ reassemble_interfaces(struct usbp_device *device)
 			if (bus->usbp_methods->pullup_control)
 				bus->usbp_methods->pullup_control(bus, false);
 			
-			bus->usbp_methods->enable(bus, false);
+			device->dev_state = USBP_DEV_ASSEMBLED;
 		}
 
+		DPRINTF(USBP_DEBUG_TRACE,
+		    ("%s: state=%d\n", __func__, device->dev_state));
+		
 		if (device->dev_state != USBP_DEV_INIT &&
 		    device->n_picked_interfaces > 0) {
 			int i;
@@ -692,6 +701,9 @@ reassemble_interfaces(struct usbp_device *device)
 			device->n_picked_interfaces = 0;
 			DPRINTF(USBP_DEBUG_TRACE,
 			    ("%s: unconfigure END\n", __func__));
+
+			bus->usbp_methods->enable(bus, false);
+			device->dev_state = USBP_DEV_NO_INTERFACE;
 		}
 
 		if (n_new <= 0) {
@@ -708,8 +720,10 @@ reassemble_interfaces(struct usbp_device *device)
 			    kmem_alloc(n_new * sizeof device->picked_interfaces[0],
 				KM_NOSLEEP);
 
-			if (device->picked_interfaces == NULL)
+			if (device->picked_interfaces == NULL) {
+				splx(s);
 				return USBD_NOMEM;
+			}
 
 			for (i=0; i < n_new; ++i) {
 				struct usbp_interface *iface = ifa[i].iface;
@@ -735,6 +749,8 @@ reassemble_interfaces(struct usbp_device *device)
 			device->dev_state = USBP_DEV_CONNECTED;
 	}
 
+	splx(s);
+	
 	return USBD_NORMAL_COMPLETION;
 }
 
@@ -1230,7 +1246,6 @@ usbp_do_request(struct usbd_xfer *xfer, void *priv,
 {
 	struct usbp_device *dev = (struct usbp_device*)(xfer->pipe->device);
 	usb_device_request_t *req = xfer->buffer;
-	//struct usbp_config *cfg;
 	void *data = NULL;
 	u_int16_t value;
 	u_int16_t index;
@@ -1814,62 +1829,51 @@ usbp_describe_xfer(struct usbd_xfer *xfer)
 /* New APIs */
 usbd_status
 usbp_add_interface(struct usbp_device *dev,
-    struct usbp_interface *iface,
-    const struct usbp_device_info *devinfo,
-    const struct usbp_interface_spec *ispec,
+    const struct usbp_add_iface_request *req,
     const struct usbp_interface_methods *methods,
     const void *additional_idesc,
-    size_t additional_idesc_size)
+    size_t additional_idesc_size,
+    struct usbp_interface **iface_ret)
 {
-	size_t ispec_size = sizeof *ispec +
-	    ispec->num_endpoints * sizeof (struct usbp_endpoint_request);
-	struct usbp_interface_spec *ispec_copy;
-
+	struct usbp_interface *iface = NULL;
 
 	DPRINTF(USBP_DEBUG_TRACE, ("%s: dev=%p empty_string=%p\n", __func__, dev, dev->empty_string));
 
-	usbp_init_interface(dev, iface);
-
-	ispec_copy = kmem_alloc(ispec_size, KM_SLEEP);
-	if (ispec_copy == NULL)
+	iface = usbp_interface_new(dev, &req->ispec, req->endpoints);
+	if (iface == NULL)
 		return USBD_NOMEM;
 
-	memcpy(ispec_copy, ispec, ispec_size);
-	iface->ispec = ispec_copy;
 	iface->methods = methods;
 
-	iface->devinfo.class_id_valid = (devinfo->class_id != USBP_ID_UNSPECIFIED);
+	iface->devinfo.class_id_valid = (req->devinfo.class_id != USBP_ID_UNSPECIFIED);
 	if (iface->devinfo.class_id_valid) {
 		iface->devinfo.class_id_valid = true;
-		iface->devinfo.class_id = devinfo->class_id;
-		iface->devinfo.subclass_id = devinfo->subclass_id;
-		iface->devinfo.protocol = devinfo->protocol;
+		iface->devinfo.class_id = req->devinfo.class_id;
+		iface->devinfo.subclass_id = req->devinfo.subclass_id;
+		iface->devinfo.protocol = req->devinfo.protocol;
 	}
 
-	iface->devinfo.vendor_id_valid = (devinfo->vendor_id != USBP_ID_UNSPECIFIED);
+	iface->devinfo.vendor_id_valid = (req->devinfo.vendor_id != USBP_ID_UNSPECIFIED);
 	if (iface->devinfo.vendor_id_valid) {
-		iface->devinfo.vendor_id = devinfo->vendor_id;
-		iface->devinfo.product_id = devinfo->product_id;
-		iface->devinfo.bcd_device = devinfo->bcd_device;
+		iface->devinfo.vendor_id = req->devinfo.vendor_id;
+		iface->devinfo.product_id = req->devinfo.product_id;
+		iface->devinfo.bcd_device = req->devinfo.bcd_device;
 	}
 
 	iface->num_strings = 4;
 	iface->string = kmem_alloc(sizeof (struct usbp_string *) * iface->num_strings, KM_SLEEP);
-	if (iface->string == NULL) {
-		kmem_free(__UNCONST(iface->ispec), ispec_size);
-		iface->ispec = NULL;
-		return USBD_NOMEM;
-	}
+	if (iface->string == NULL)
+		goto nomem;
 	
 
 	iface->string[USBP_IF_STR_MANUFACTURER] = 
-	    usbp_intern_string(dev, devinfo->manufacturer_name);
+	    usbp_intern_string(dev, req->devinfo.manufacturer_name);
 	iface->string[USBP_IF_STR_PRODUCT_NAME] = 
-	    usbp_intern_string(dev, devinfo->product_name);
+	    usbp_intern_string(dev, req->devinfo.product_name);
 	iface->string[USBP_IF_STR_SERIAL] = 
-	    usbp_intern_string(dev, devinfo->serial);
+	    usbp_intern_string(dev, req->devinfo.serial);
 	iface->string[USBP_IF_STR_DESCRIPTION] = 
-	    usbp_intern_string(dev, ispec->description);
+	    usbp_intern_string(dev, req->ispec.description);
 
 	if (additional_idesc == NULL || additional_idesc_size == 0) {
 		iface->additional_idesc = NULL;
@@ -1883,12 +1887,16 @@ usbp_add_interface(struct usbp_device *dev,
 	SIMPLEQ_INSERT_HEAD(&dev->interface_list, iface, next);
 	dev->n_interfaces++;
 
-	if (!cold) {
-		// reconfigure
-	}
-		
-	
+	*iface_ret = iface;
 	return USBD_NORMAL_COMPLETION;
+
+nomem:
+	if (iface) {
+		usbp_interface_free(iface);
+	}
+	
+	return USBD_NOMEM;
+	
 }
 
 usbd_status
@@ -1909,32 +1917,7 @@ usbp_delete_interface(struct usbp_interface *iface)
 			return err;
 	}
 		
-	if (iface->ispec) {
-		size_t ispec_size = sizeof *iface->ispec +
-		    iface->ispec->num_endpoints * sizeof (struct usbp_endpoint_request);
-		kmem_free(__UNCONST(iface->ispec), ispec_size);
-		iface->ispec = NULL;
-	}
-		
-
-	if (iface->string) {
-		int i;
-
-		DPRINTF(USBP_DEBUG_STRING,
-		    ("%s: relasing strings for iface\n", __func__));
-		for (i=0; i < iface->num_strings; ++i) {
-			if (iface->string[i]) {
-				usbp_release_string(dev, iface->string[i]);
-			}
-		}
-
-
-		DPRINTF(USBP_DEBUG_STRING,
-		    ("%s: free strings for iface\n", __func__));
-		kmem_free(iface->string, sizeof (struct usbp_string *) * iface->num_strings);
-		iface->string = NULL;
-		iface->num_strings = 0;
-	}
+	usbp_interface_free(iface);
 
 	iface->usbd.device = NULL;
 	return err;
@@ -2121,19 +2104,117 @@ get_string_descriptor(struct usbp_device *dev, int index)
 
 
 
-void
-usbp_init_interface(struct usbp_device *dev, struct usbp_interface *iface)
+static struct usbp_interface *
+usbp_interface_new(struct usbp_device *dev,
+    const struct usbp_interface_spec *ispec,
+    const struct usbp_endpoint_request *epreq)
 {
-	memset(iface, 0, sizeof *iface);
+	void *area;
+	struct usbp_interface *iface;
+	size_t iface_size = sizeof *iface + sizeof *ispec +
+	    ispec->num_endpoints * sizeof (struct usbp_endpoint_request);
+
+	area = kmem_zalloc(iface_size, KM_SLEEP);
+	if (area == NULL)
+		return NULL;
+
+	iface = (struct usbp_interface *)area;
+	area = &iface[1];
+	memcpy(area, ispec, sizeof *ispec);
+	iface->ispec = (const struct usbp_interface_spec *)area;
+	area = __UNCONST(&iface->ispec[1]);
+	memcpy(area, epreq, ispec->num_endpoints * sizeof *epreq);
+	iface->epreq = (const struct usbp_endpoint_request *)area;
+
+	iface->alloc_size = iface_size;
 	iface->usbd.device = &dev->usbd;
+
+	return iface;
 }
+
+static void
+usbp_interface_free(struct usbp_interface *iface)
+{
+	if (iface->string) {
+		int i;
+
+		DPRINTF(USBP_DEBUG_STRING,
+		    ("%s: releasing strings for iface\n", __func__));
+		for (i=0; i < iface->num_strings; ++i) {
+			if (iface->string[i]) {
+				usbp_release_string(
+					usbp_interface_to_device(iface),
+					iface->string[i]);
+			}
+		}
+
+		DPRINTF(USBP_DEBUG_STRING,
+		    ("%s: free strings for iface\n", __func__));
+		kmem_free(iface->string, sizeof (struct usbp_string *) * iface->num_strings);
+		iface->string = NULL;
+		iface->num_strings = 0;
+	}
+
+
+	kmem_free(iface, iface->alloc_size);
+}
+
 
 static void
 usbp_child_detached(device_t self, device_t child)
 {
+	struct usbp_softc *sc = device_private(self);
+
 	DPRINTF(USBP_DEBUG_TRACE, ("%s\n", __func__));
 
-	/* children call usbp_delete_interface by themselves.
-	   nothing to do here.
-	   this function is necessary for "drvctl -d" to work  */
+	if (child == sc->sc_user_if)
+		sc->sc_user_if = NULL;
+	else {
+		/* USB iface children call usbp_delete_interface by
+		   themselves.  nothing to do here.  this function is
+		   necessary for "drvctl -d" to work */
+	}
+}
+
+
+/*
+ * for usbpusr
+ */
+int
+usbp_set_pullup(device_t self, bool on)
+{
+	struct usbp_softc *sc = device_private(self);
+	struct usbp_bus *bus = sc->sc_bus;
+
+	if (bus->usbp_methods->pullup_control)
+		bus->usbp_methods->pullup_control(bus, on);
+	
+	return 0;
+}
+
+int
+usbp_add_iface(device_t self, struct usbp_add_iface *req, int flag, struct lwp *lwp)
+{
+	int e;
+	size_t copy_len;
+	struct usbp_add_iface_request *r;
+	void *area;
+	
+	DPRINTF(USBP_DEBUG_USR, ("%s: req=%p req->request=%p flag=%x\n", __func__,
+		req, req->request, flag));
+
+	copy_len = sizeof *r + USB_MAX_ENDPOINTS * sizeof (struct usbp_endpoint_request);
+	area = alloca(copy_len);
+	e = ioctl_copyin(flag, req->request, area, copy_len);
+	if (e)
+		return e;
+	
+	r = area;
+	printf("class_id=%x ifproto=%x mname=%p\n",
+	    r->devinfo.class_id, r->ispec.protocol,
+	    r->devinfo.manufacturer_name);
+
+	req->ifaceid = 0x5555;
+
+	return 0;
 }
