@@ -59,8 +59,8 @@
 
 #include "usbp.h"
 
-#define	DEBUG_RX
-#define	DEBUG_TX
+//#define	DEBUG_RX
+//#define	DEBUG_TX
 #define PXAUDC_DEBUG
 
 struct pxaudc_xfer {
@@ -259,6 +259,7 @@ pxaudc_attach_sub(device_t self, struct pxaip_attach_args *pxa,
 
 	/* Set up the bus struct. */
 	sc->sc_bus.usbd.methods = &pxaudc_bus_methods;
+	sc->usbp_bus_methods = *platform_bus_methods;
 	sc->sc_bus.usbp_methods = &sc->usbp_bus_methods;
 	if (sc->usbp_bus_methods.select_endpoint == NULL)
 		sc->usbp_bus_methods.select_endpoint = pxaudc_select_endpoint;
@@ -512,16 +513,31 @@ pxaudc_read_ep0_errata(struct pxaudc_softc *sc, struct usbd_xfer *xfer)
 
 }
 
+static size_t
+pxaudc_read_sub(struct pxaudc_softc *sc, int ep, uint32_t csr, uint8_t *buf, size_t buflen)
+{
+	uint32_t count;
+	size_t len;
+	uint32_t datareg = udc_ep_regs[ep].data, countreg = udc_ep_regs[ep].count;
+	
+	count = CSR_READ_4(sc, countreg) + 1;
+	len = MIN(count, buflen);
+
+#ifdef DEBUG_RX
+	printf("reading data from ep%d len %zd csr %x\n", ep, len, csr);
+#endif
+	bus_space_read_multi_1(sc->sc_iot, sc->sc_ioh, datareg, buf, len);
+	return len;
+}
+
 static void
 pxaudc_read_epN(struct pxaudc_softc *sc, int ep)
 {
-	size_t len, tlen;
-	u_int8_t *p;
+	size_t len;
 	struct usbd_pipe *pipe = NULL;
 	struct usbd_xfer *xfer = NULL;
-	int count;
 	u_int32_t csr;
-	uint32_t datareg = udc_ep_regs[ep].data, countreg = udc_ep_regs[ep].count;
+	uint32_t countreg = udc_ep_regs[ep].count;
 
 	DPRINTF(10, ("read_ep%d ppipe=%p\n", ep, sc->sc_pipe[ep]));
 	if (countreg == 0) {
@@ -532,6 +548,9 @@ pxaudc_read_epN(struct pxaudc_softc *sc, int ep)
 
 	pipe = sc->sc_pipe[ep];
 	if (pipe == NULL) {
+#ifdef DEBUG_RX
+		printf("%s: read no pipe (ep%d)\n", __func__, ep);
+#endif
 		return;
 	}
 
@@ -540,11 +559,14 @@ pxaudc_read_epN(struct pxaudc_softc *sc, int ep)
 		xfer = SIMPLEQ_FIRST(&pipe->queue);
 
 		if (xfer == NULL) {
-			printf("pxaudc_read_epN: ep %d, no xfer\n", ep);
+			aprint_error("pxaudc_read_epN: ep%d, no xfer\n", ep);
 			return;
 		}
 
 		csr = CSR_READ_4(sc, USBDC_UDCCS(ep));
+#ifdef DEBUG_RX
+		printf("%s: csr%d=%x count=%d\n", __func__, ep, csr, 1+CSR_READ_4(sc,countreg));
+#endif
 
 		if ((csr & (USBDC_UDCCS_RNE|USBDC_UDCCS_RSP)) == USBDC_UDCCS_RSP) {
 #ifdef DEBUG_RX
@@ -556,26 +578,21 @@ pxaudc_read_epN(struct pxaudc_softc *sc, int ep)
 			return;
 		}
 
+#if 1
 		if ((csr & USBDC_UDCCS_RNE) == 0) {
 			/* no data in FIFO */
+			CSR_SET_4(sc, USBDC_UDCCS(ep), USBDC_UDCCS_RPC);
 			return;
 		}
-		
-		count = CSR_READ_4(sc, countreg) + 1;
-		tlen = len = MIN(count, xfer->length - xfer->actlen);
-		p = (uint8_t *)(xfer->buffer) + xfer->actlen;
-
-#ifdef DEBUG_RX
-		printf("reading data from endpoint %x, len %x csr %x\n",
-		       ep, count, csr);
 #endif
 
-	
-		bus_space_read_multi_1(sc->sc_iot, sc->sc_ioh, datareg, p, count);
-		CSR_SET_4(sc, USBDC_UDCCS(ep), USBDC_UDCCS_RPC);
-		xfer->actlen += count;
+		len = pxaudc_read_sub(sc, ep, csr,
+		    (uint8_t *)(xfer->buffer) + xfer->actlen,
+		    xfer->length - xfer->actlen);
 
-		if (xfer->length == xfer->actlen || (tlen == 0 && xfer->actlen != 0) 
+		xfer->actlen += len;
+		
+		if (xfer->length == xfer->actlen || (len == 0 && xfer->actlen != 0) 
 		    || (csr & USBDC_UDCCS_RSP) ) {
 #ifdef DEBUG_RX
 			printf("trans2 complete\n");
@@ -585,10 +602,37 @@ pxaudc_read_epN(struct pxaudc_softc *sc, int ep)
 		}
 		csr = CSR_READ_4(sc, USBDC_UDCCS(ep));
 #ifdef DEBUG_RX
-		printf("csr now %x len %x\n",
+		printf("csr now %x len %d\n",
 		       csr, CSR_READ_4(sc, countreg));
 #endif
 	} while (csr & USBDC_UDCCS_RFS);
+
+#ifdef DEBUG_RX
+	printf("complete reading.\n");
+#endif
+	CSR_SET_4(sc, USBDC_UDCCS(ep), USBDC_UDCCS_RPC);
+}
+
+static void
+pxaudc_clear_epN(struct pxaudc_softc *sc, int ep)
+{
+	u_int32_t csr;
+	uint8_t buf[1024];	//XXX
+
+	if (udc_ep_regs[ep].count == 0) {
+		aprint_error("%s: %s: EP%d is not OUT endpoint\n",
+			     DEVNAME(sc), __func__, ep);
+		return;
+	}
+
+	csr = CSR_READ_4(sc, USBDC_UDCCS(ep));
+
+	if ((csr & USBDC_UDCCS_RNE) == 0) {
+		/* no data in FIFO */
+		return;
+	}
+		
+	pxaudc_read_sub(sc, ep, csr, buf, sizeof buf);
 }
 
 void
@@ -807,8 +851,6 @@ pxaudc_intr(void *v)
 	return 1;
 }
 
-//u_int32_t csr1, csr2;
-
 static void
 pxaudc_intr1(struct pxaudc_softc *sc)
 {
@@ -865,10 +907,15 @@ pxaudc_epN_intr(struct pxaudc_softc *sc, int ep)
 
 	DPRINTF(10, ("%s: ep%d intr ppipe=%p\n", __func__, ep, sc->sc_pipe[ep]));
 	    
-	/* faster method of determining direction? */
 	pipe = sc->sc_pipe[ep];
-	if (pipe == NULL)
+	if (pipe == NULL) {
+		if (udc_ep_regs[ep].count) {
+			/* this is OUT endpoint and no pipe is opened. */
+			DPRINTF(0, ("%s: ep%d interrupt while no pipe is opened.\n", __func__, ep));
+			pxaudc_clear_epN(sc, ep);
+		}
 		return;
+	}
 
 	endpoint = pipe->endpoint;
 	dir = usbd_endpoint_dir(endpoint);
@@ -1095,13 +1142,20 @@ pxaudc_ctrl_transfer(struct usbd_xfer *xfer)
 {
 	usbd_status err;
 	struct pxaudc_xfer *pxfer = (struct pxaudc_xfer *)xfer;
+	struct pxaudc_softc *sc = xfer->pipe->device->bus->hci_private;
 
-	printf("%s xfer=%p\n", __func__, xfer);
+	printf("%s xfer=%p sc=%p\n", __func__, xfer, sc);
 
 	pxfer->frmlen = 0;
 
 	/* Insert last in queue. */
+#if 1
 	err = usbp_insert_transfer(xfer);
+#else
+	mutex_enter(&sc->sc_lock);
+	err = usb_insert_transfer(xfer);
+	mutex_exit(&sc->sc_lock);
+#endif
 	if (err)
 		return err;
 
@@ -1182,6 +1236,7 @@ pxaudc_ctrl_abort(struct usbd_xfer *xfer)
 	 */
 	s = splusb();
 	usbp_transfer_complete(xfer);
+//	usbd_transfer_complete(xfer);
 	splx(s);
 }
 
@@ -1193,7 +1248,6 @@ pxaudc_ctrl_done(struct usbd_xfer *xfer)
 void
 pxaudc_ctrl_close(struct usbd_pipe *pipe)
 {
-	/* XXX */
 }
 
 /*
@@ -1204,11 +1258,18 @@ usbd_status
 pxaudc_bulk_transfer(struct usbd_xfer *xfer)
 {
 	usbd_status err;
+	struct pxaudc_softc *sc = xfer->pipe->device->bus->hci_private;
 
-	DPRINTF(5, ("%s: xfer=%p\n", __func__, xfer));
+	DPRINTF(5, ("%s: xfer=%p sc=%p\n", __func__, xfer, sc));
 
 	/* Insert last in queue. */
+#if 1
 	err = usbp_insert_transfer(xfer);
+#else
+	mutex_enter(&sc->sc_lock);
+	err = usb_insert_transfer(xfer);
+	mutex_exit(&sc->sc_lock);
+#endif
 	if (err)
 		return err;
 
@@ -1266,7 +1327,37 @@ pxaudc_bulk_done(struct usbd_xfer *xfer)
 void
 pxaudc_bulk_close(struct usbd_pipe *pipe)
 {
-	/* XXX */
+	struct pxaudc_softc *sc = (struct pxaudc_softc *)pipe->device->bus;
+	struct usbd_endpoint *endpoint = pipe->endpoint;
+	int ep_idx;
+	int s;
+	u_int icrreg;
+	
+	ep_idx = usbd_endpoint_index(endpoint);
+	DPRINTF(10,("pxaudc_bulk_close  ep%d sc=%p npipe=%d\n", ep_idx, sc, sc->sc_npipe));
+
+	if (ep_idx >= PXAUDC_NEP)
+		return;
+
+
+	s = splhardusb();
+
+	sc->sc_pipe[ep_idx] = NULL;
+	sc->sc_npipe--;
+
+	
+	/* Mask interrupts for the endpoint */
+	icrreg = USBDC_UICR0;
+	if (ep_idx >= 8)
+		icrreg = USBDC_UICR1;
+
+	CSR_SET_4(sc, icrreg, (1 << (ep_idx % 8)));
+
+	/* clear read buffer */
+	if (udc_ep_regs[ep_idx].count != 0)
+		CSR_SET_4(sc, USBDC_UDCCS(ep_idx), USBDC_UDCCS_RPC);
+
+	splx(s);
 }
 
 #endif /* NUSBP > 0 */
@@ -1313,9 +1404,11 @@ pxaudc_bulk_close(struct usbd_pipe *pipe)
 
 
 static void
-pxaudc_get_lock(struct usbd_bus *bus, kmutex_t **mutexe)
+pxaudc_get_lock(struct usbd_bus *bus, kmutex_t **mutex)
 {
-	printf("!!! get_lock called\n");
+	struct pxaudc_softc *sc = bus->hci_private;
+
+	*mutex = &sc->sc_lock;
 }
 
 static usbd_status
@@ -1352,40 +1445,46 @@ pxaudc_select_endpoint(struct usbp_bus *bus, struct usbp_endpoint_request *epreq
 		[UE_INTERRUPT] = 8
 	};
 	const uint8_t *bp;
-	int dir = UE_GET_DIR(epreq->address);
-	int index = UE_GET_ADDR(epreq->address);
+	int dir = epreq->dir;
+	int index = epreq->epnum;
 	int xfrtype = UE_GET_XFERTYPE(epreq->attributes);
 	int i;
 
+	if ((dir != UE_DIR_OUT && dir != UE_DIR_IN) ||
+	    (index < 0 || USB_MAX_ENDPOINTS <= index ))
+		return USBD_BAD_ADDRESS;
+
 	bp = epspec[dir == UE_DIR_OUT ? 0: 1][xfrtype];
-	DPRINTF(0, ("dir=%x xfrtype=%x index=%d bp[0]=%d\n", dir, xfrtype, index, bp[0]));
+	DPRINTF(0, ("%s: dir=%x xfrtype=%x index=%d bp[0]=%d\n", __func__,
+		dir, xfrtype, index, bp[0]));
 	if (index != 0) {
 		/* Endpoint address is specified explicitly.
 		   check if transfer type matches */
 		for (i=0; bp[i]; ++i) {
-			if (index == bp[i])
-				break;
+			if (index != bp[i])
+				continue;
+			/*XXX check packetsize */
 		}
 		if (bp[i] == 0) {
 			/* doesn't match */
-			index = 0;
+			return USBD_BAD_ADDRESS;
 		}
 	}
-
-	if (index == 0) {
+	else {
 		/* find a suitable endpoint */
 		for (i=0; bp[i]; ++i) {
 			DPRINTF(0, ("dir=%x xfrtype=%x i=%d bp[i]=%d\n", dir, xfrtype, i, bp[i]));
-			if ((map & (1 << bp[i])) == 0) {
-				break;
-			}
+			if ((map & (1 << bp[i])) != 0)
+				continue;
+			/* XXX check packetsize */
+			break;
 		}
 		if (bp[i] == 0)
 			return USBD_NO_ADDR;
 		index = bp[i];
 	}
 
-	epreq->address = dir | index;
+	epreq->epnum = index;
 	epreq->packetsize = type_to_packetsize[xfrtype];
 	return USBD_NORMAL_COMPLETION;
 }
