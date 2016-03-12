@@ -61,6 +61,8 @@ __KERNEL_RCSID(0, "$NetBSD$");
 #include <sys/kmem.h>
 #include <sys/proc.h>
 #include <sys/bitops.h>
+#include <sys/mutex.h>
+#include <sys/kthread.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -139,6 +141,9 @@ struct usbp_device {
 	/* scratch area to send string descriptor back to the host */
 	usb_string_descriptor_t	string_descriptor;
 
+	kcondvar_t	cv;
+	kmutex_t	mtx;
+	bool interface_list_changed;
 };
 
 
@@ -159,10 +164,6 @@ struct usbp_softc {
 	device_t sc_dev;
 	struct usbp_bus  *sc_bus;
 	struct usbp_device *sc_usbdev;
-#if 0
-	lwp_t sc_thread;	/* task thread */
-	TAILQ_HEAD(,usbp_task)	 sc_tskq;	/* task queue head */
-#endif
 	bool sc_dying;
 	u_int8_t		*sc_hs_config;
 
@@ -205,6 +206,7 @@ static struct usbp_interface *usbp_interface_new(struct usbp_device *,
     const struct usbp_interface_spec *,
     const struct usbp_endpoint_request *);
 static void usbp_interface_free(struct usbp_interface *);
+static void usbp_thread(void *);
 
 extern struct cfdriver usbf_cd;
 
@@ -271,11 +273,6 @@ usbp_attach(device_t parent, device_t self, void *aux)
 	}
 	aprint_normal("\n");
 
-#if 0
-	/* Initialize the usbf struct. */
-	TAILQ_INIT(&sc->sc_tskq);
-#endif
-
 	/* Establish the software interrupt. */
 	if (usbp_softintr_establish(sc)) {
 		printf("%s: can't establish softintr\n", DEVNAME(sc));
@@ -297,13 +294,6 @@ usbp_attach(device_t parent, device_t self, void *aux)
 	sc->sc_user_if = config_found_sm_loc(self, "usbp", NULL, &uia, NULL, NULL);
 
 	config_defer(self, start_usbp);
-#if 0
-	/* Create a process context for asynchronous tasks. */
-	if (kthread_create(PRI_NONE, 0, NULL, usbf_task_thread, sc,
-			   &sc->sc_proc, "%s", device_xname(self)) ) {
-		aprint_normal_dev(self, "unable to create event thread for USB client\n");
-	}
-#endif
 	
 }
 
@@ -312,11 +302,35 @@ static void
 start_usbp(device_t self)
 {
 	struct usbp_softc *sc = device_private(self);
+
+	/* Create a process context for asynchronous tasks. */
+	if (kthread_create(PRI_NONE, 0, NULL, usbp_thread, sc,
+			   NULL, "%s", device_xname(self)) ) {
+		aprint_normal_dev(self, "unable to create event thread for USB client\n");
+	}
+
+}
+
+static void
+usbp_thread(void *arg)
+{
+	struct usbp_softc *sc = arg;
 	struct usbp_device *dev = sc->sc_usbdev;
+	
+	DPRINTF(USBP_DEBUG_TRACE, ("%s: usbp started\n", __func__));
 
-	DPRINTF(USBP_DEBUG_TRACE, ("%s: assemble interfaces\n", __func__));
-	reassemble_interfaces(dev);
+	mutex_enter(&dev->mtx);
+	while(!sc->sc_dying) {
+		DPRINTF(USBP_DEBUG_TRACE, ("%s: woke up\n", __func__));
 
+		if (dev->interface_list_changed) {
+			dev->interface_list_changed = false;
+			DPRINTF(USBP_DEBUG_TRACE, ("%s: assemble interfaces\n", __func__));
+			reassemble_interfaces(dev);
+		}
+		cv_wait(&dev->cv, &dev->mtx);	/* mutex released here */
+	}
+	kthread_exit(0);
 }
 
 
@@ -602,10 +616,11 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 			ep->refcnt = 0;
 			ep->datatoggle = 0;
 			
-			printf("%s: interface=%p endpoitns=%p endpoint[%d]=0x%x (%p)\n",
+			DPRINTF(USBP_DEBUG_MISC, ("%s: interface=%p endpoitns=%p endpoint[%d]=0x%x (%p)\n",
 			    __func__,
 			    iface, iface->usbd.endpoints,
-			    j, ep->edesc->bEndpointAddress, ed);
+				j, ep->edesc->bEndpointAddress, ed));
+
 			ap += USB_ENDPOINT_DESCRIPTOR_SIZE;
 		}
 
@@ -618,8 +633,8 @@ build_config_descriptor(struct usbp_device *usbdev, struct iface_assembly *ifa, 
 			iface->methods->fixup_idesc(iface, id);
 
 		iface->usbd.idesc = id;
-		printf("%s: interface=%p idesc=%p numEndpoints=%d\n",
-		    __func__, iface, id, id->bNumEndpoints);
+		DPRINTF(USBP_DEBUG_MISC, ("%s: interface=%p idesc=%p numEndpoints=%d\n",
+			__func__, iface, id, id->bNumEndpoints));
 	}
 
 
@@ -651,6 +666,9 @@ deactivate_interface(struct usbp_interface *iface)
 	return USBD_NORMAL_COMPLETION;
 }
 
+/*
+ * run by usbp_thread in IPL_SOFTUSB with device->mtx held
+ */
 static usbd_status
 reassemble_interfaces(struct usbp_device *device)
 {
@@ -659,9 +677,6 @@ reassemble_interfaces(struct usbp_device *device)
 	int n_new;
 	enum USBP_DEVICE_STATE old_state = device->dev_state;
 	struct usbp_bus *bus = (struct usbp_bus *)device->usbd.bus;
-	int s;
-
-	s = splhardusb();
 
 	n_new = select_interfaces(device, ifa);
 
@@ -731,7 +746,6 @@ reassemble_interfaces(struct usbp_device *device)
 				KM_NOSLEEP);
 
 			if (device->picked_interfaces == NULL) {
-				splx(s);
 				return USBD_NOMEM;
 			}
 
@@ -760,8 +774,6 @@ reassemble_interfaces(struct usbp_device *device)
 			device->dev_state = USBP_DEV_CONNECTED;
 	}
 
-	splx(s);
-	
 	return USBD_NORMAL_COMPLETION;
 }
 
@@ -865,6 +877,9 @@ usbp_new_device(device_t parent, struct usbp_bus *bus, int speed)
 
 	dev->dev_state = USBP_DEV_INIT;
 	dev->connect_auto = true;          // XXX
+
+	cv_init(&dev->cv, device_xname(parent));
+	mutex_init(&dev->mtx, MUTEX_DEFAULT, IPL_SOFTUSB);
 
 	/* initialize string pool */
 	/* __BITMAP_ZERO(...) */
@@ -1895,9 +1910,13 @@ usbp_add_interface(struct usbp_device *dev,
 		iface->additional_idesc_size = additional_idesc_size;
 	}
 
+	mutex_enter(&dev->mtx);
 	SIMPLEQ_INSERT_HEAD(&dev->interface_list, iface, next);
 	dev->n_interfaces++;
 	iface->ref_count++;
+	dev->interface_list_changed = true;
+	cv_signal(&dev->cv);
+	mutex_exit(&dev->mtx);
 
 	*iface_ret = iface;
 	return USBD_NORMAL_COMPLETION;
@@ -1914,6 +1933,7 @@ nomem:
 void
 usbp_unref_interface(struct usbp_interface *iface)
 {
+	/* XXX need lock */
 	if (--iface->ref_count <= 0)
 		usbp_interface_free(iface);
 }
@@ -1926,8 +1946,13 @@ usbp_delete_interface(struct usbp_interface *iface)
 
 	KASSERT(dev != NULL);
 	
+	mutex_enter(&dev->mtx);
 	SIMPLEQ_REMOVE(&dev->interface_list, iface, usbp_interface, next);
 	dev->n_interfaces--;
+	dev->interface_list_changed = true;
+	cv_signal(&dev->cv);
+	mutex_exit(&dev->mtx);
+
 	usbp_unref_interface(iface);
 	/* iface may be free-ed here */
 

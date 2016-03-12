@@ -97,8 +97,15 @@ struct usbp_add_iface {
 	const struct usbp_add_iface_request *request;
 };
 
-//#define USB_DISCOVER		_IO  ('U', 3)
 
+/* EADDRNOTAVAIL when endpoint was not assigned */
+#define	USBP_IOC_GETEP	_IOWR('U', 514, struct usbp_get_ep)
+struct usbp_get_ep {
+	int ifaceid;
+	uint8_t ep_idx;
+	uByte address;
+	uint16_t packet_size;
+};
 
 
 #endif	/* _USBPIF_H */

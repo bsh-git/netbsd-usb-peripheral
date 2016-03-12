@@ -91,6 +91,9 @@ struct cdcef_softc {
 
 	int			sc_rxeof_errors;
 	int			sc_listening;
+
+	bool	sc_iface_configured;
+	bool	sc_cdce_attached;
 };
 
 int		cdcef_match(device_t, cfdata_t, void *);
@@ -161,6 +164,9 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 	struct usbp_interface_attach_args *uaa = aux;
 	struct usbp_device *dev = uaa->device;
 	usbd_status err;
+	int s;
+	u_int16_t macaddr_hi;
+	struct ifnet *ifp;
 	static const struct usbp_add_iface_request  iface_req = {
 		.devinfo = {
 			.class_id = UDCLASS_IN_INTERFACE,
@@ -232,58 +238,6 @@ cdcef_attach(device_t parent, device_t self, void *aux)
 		goto error_out;
 	}
 
-	sc->sc_iface->usbd.priv = sc;
-	return;
-
-error_out:
-	if (sc->sc_xfer_in != NULL) {
-		usbd_free_xfer(sc->sc_xfer_in);
-		sc->sc_xfer_in = NULL;
-	}
-	if (sc->sc_xfer_out != NULL) {
-		usbd_free_xfer(sc->sc_xfer_out);
-		sc->sc_xfer_out = NULL;
-	}
-	if (sc->sc_buffer_in != NULL) {
-		usbd_free_buffer(sc->sc_buffer_in);
-		sc->sc_xfer_out = NULL;
-	}
-	if (sc->sc_buffer_out != NULL) {
-		usbd_free_buffer(sc->sc_buffer_out);
-		sc->sc_xfer_out = NULL;
-	}
-}
-
-static usbd_status
-cdcef_on_configured(struct usbp_interface *iface)
-{
-	u_int16_t macaddr_hi;
-	int s;
-	struct ifnet *ifp;
-	usbd_status err;
-	struct cdcef_softc *sc = iface->usbd.priv;
-	int open_pipe_flags = 0; /* USBD_EXCLUSIVE_USE|USBD_MPSAFE */
-
-
-	DPRINTF(5, ("%s\n", __func__));
-
-	/* Open the bulk pipes. */
-	err = usbp_open_pipe(iface, 0, open_pipe_flags, &sc->sc_pipe_in) ||
-		usbp_open_pipe(iface, 1, open_pipe_flags, &sc->sc_pipe_out);
-	if (err) {
-		printf(": usbf_open_pipe failed\n");
-		return err;
-	}
-
-	/* Get ready to receive packets. */
-	usbd_setup_xfer(sc->sc_xfer_out, sc->sc_pipe_out, sc,
-	    sc->sc_buffer_out, CDCEF_BUFSZ, USBD_SHORT_XFER_OK, 0, cdcef_rxeof);
-	err = usbd_transfer(sc->sc_xfer_out);
-	if (err && err != USBD_IN_PROGRESS) {
-		printf(": usbd_transfer failed\n");
-		return err;
-	}
-
 	s = splnet();
 
 	macaddr_hi = htons(0x2acb);
@@ -327,7 +281,69 @@ cdcef_on_configured(struct usbp_interface *iface)
 
 	if_attach(ifp);
 	ether_ifattach(ifp, sc->sc_ether_addr);
+	sc->sc_cdce_attached = true;
 	splx(s);
+
+
+	sc->sc_iface->usbd.priv = sc;
+	return;
+
+error_out:
+	if (sc->sc_xfer_in != NULL) {
+		usbd_free_xfer(sc->sc_xfer_in);
+		sc->sc_xfer_in = NULL;
+	}
+	if (sc->sc_xfer_out != NULL) {
+		usbd_free_xfer(sc->sc_xfer_out);
+		sc->sc_xfer_out = NULL;
+	}
+	if (sc->sc_buffer_in != NULL) {
+		usbd_free_buffer(sc->sc_buffer_in);
+		sc->sc_xfer_out = NULL;
+	}
+	if (sc->sc_buffer_out != NULL) {
+		usbd_free_buffer(sc->sc_buffer_out);
+		sc->sc_xfer_out = NULL;
+	}
+}
+
+static usbd_status
+cdcef_on_configured(struct usbp_interface *iface)
+{
+	int s;
+	usbd_status err;
+	struct cdcef_softc *sc = iface->usbd.priv;
+	struct ifnet *ifp = GET_IFP(sc);
+	int open_pipe_flags = 0; /* USBD_EXCLUSIVE_USE|USBD_MPSAFE */
+
+
+	DPRINTF(5, ("%s\n", __func__));
+
+	/* Open the bulk pipes. */
+	err = usbp_open_pipe(iface, 0, open_pipe_flags, &sc->sc_pipe_in) ||
+		usbp_open_pipe(iface, 1, open_pipe_flags, &sc->sc_pipe_out);
+	if (err) {
+		printf(": usbf_open_pipe failed\n");
+		return err;
+	}
+
+	/* Get ready to receive packets. */
+	usbd_setup_xfer(sc->sc_xfer_out, sc->sc_pipe_out, sc,
+	    sc->sc_buffer_out, CDCEF_BUFSZ, USBD_SHORT_XFER_OK, 0, cdcef_rxeof);
+	err = usbd_transfer(sc->sc_xfer_out);
+	if (err && err != USBD_IN_PROGRESS) {
+		printf(": usbd_transfer failed\n");
+		return err;
+	}
+
+
+	sc->sc_iface_configured = true;
+	s = splnet();
+	
+	if ((ifp->if_flags & IFF_UP) && !(ifp->if_flags & IFF_RUNNING))
+		cdcef_init(ifp);
+	splx(s);
+
 
 	return USBD_NORMAL_COMPLETION;
 }
@@ -335,7 +351,17 @@ cdcef_on_configured(struct usbp_interface *iface)
 static usbd_status
 cdcef_on_unconfigured(struct usbp_interface *iface)
 {
+	int s;
+	struct cdcef_softc *sc = iface->usbd.priv;
+	struct ifnet *ifp = GET_IFP(sc);
+	
 	DPRINTF(5, ("%s\n", __func__));
+	sc->sc_iface_configured = false;
+
+	s = splnet();
+	if (ifp->if_flags & IFF_RUNNING)
+		cdcef_stop(sc);
+	splx(s);
 	return USBD_NORMAL_COMPLETION;
 }
 
@@ -653,8 +679,6 @@ cdcef_encap(struct cdcef_softc *sc, struct mbuf *m, int idx)
 	    m->m_pkthdr.len, USBD_FORCE_SHORT_XFER | USBD_NO_COPY,
 	    10000, cdcef_txeof);
 
-	printf("%s: %s\n", __func__, usbp_describe_xfer(sc->sc_xfer_in));
-
 	err = usbd_transfer(sc->sc_xfer_in);
 	if (err && err != USBD_IN_PROGRESS) {
 		printf("encap error\n");
@@ -699,7 +723,6 @@ cdcef_fixup_idesc(struct usbp_interface *iface, usb_interface_descriptor_t *ides
 #endif
 
 
-
 int
 cdcef_detach(device_t self, int flag)
 {
@@ -708,12 +731,13 @@ cdcef_detach(device_t self, int flag)
 	struct ifnet	*ifp = GET_IFP(sc);
 
 	s = splusb();
-#if 0
-	if (!sc->cdce_attached) {
+
+	if (!sc->sc_cdce_attached) {
+		
 		splx(s);
 		return 0;
 	}
-#endif
+
 
 	if (ifp->if_flags & IFF_RUNNING)
 		cdcef_stop(sc);
@@ -721,8 +745,6 @@ cdcef_detach(device_t self, int flag)
 	ether_ifdetach(ifp);
 
 	if_detach(ifp);
-
-	// sc->cdce_attached = 0;
 
 	(void)usbp_delete_interface(sc->sc_iface);
 	

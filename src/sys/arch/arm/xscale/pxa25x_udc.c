@@ -61,7 +61,7 @@
 
 //#define	DEBUG_RX
 //#define	DEBUG_TX
-#define PXAUDC_DEBUG
+//#define PXAUDC_DEBUG
 
 struct pxaudc_xfer {
 	struct usbd_xfer	 xfer;
@@ -1142,9 +1142,11 @@ pxaudc_ctrl_transfer(struct usbd_xfer *xfer)
 {
 	usbd_status err;
 	struct pxaudc_xfer *pxfer = (struct pxaudc_xfer *)xfer;
+#ifdef PXAUDC_DEBUG
 	struct pxaudc_softc *sc = xfer->pipe->device->bus->hci_private;
+#endif
 
-	printf("%s xfer=%p sc=%p\n", __func__, xfer, sc);
+	DPRINTF(0, ("%s xfer=%p sc=%p\n", __func__, xfer, sc));
 
 	pxfer->frmlen = 0;
 
@@ -1258,7 +1260,9 @@ usbd_status
 pxaudc_bulk_transfer(struct usbd_xfer *xfer)
 {
 	usbd_status err;
+#ifdef PXAUDC_DEBUG
 	struct pxaudc_softc *sc = xfer->pipe->device->bus->hci_private;
+#endif
 
 	DPRINTF(5, ("%s: xfer=%p sc=%p\n", __func__, xfer, sc));
 
